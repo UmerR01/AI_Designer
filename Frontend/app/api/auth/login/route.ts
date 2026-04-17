@@ -37,12 +37,12 @@ export async function POST(_req_: Request) {
       last_name: string;
       password_hash: string;
       is_support_agent: boolean;
-    }>
+    }>`
       select id, email, first_name, last_name, password_hash, is_support_agent
       from users
       where email = ${email.toLowerCase()}
       limit 1
-    ;
+    `;
   } catch {
     return NextResponse.json({ detail: "Sign in failed. Database not ready." }, { status: 500 });
   }

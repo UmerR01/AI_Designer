@@ -29,11 +29,11 @@ export async function POST(_req_: Request) {
       email: string;
       first_name: string;
       last_name: string;
-    }>
+    }>`
       insert into users (email, first_name, last_name, password_hash)
       values (${email.toLowerCase()}, ${first_name}, ${last_name}, ${passwordHash})
       returning id, email, first_name, last_name
-    ;
+    `;
  
     const user = created[0];
     const maxAgeSeconds = 60 * 60 * 24 * 30;
