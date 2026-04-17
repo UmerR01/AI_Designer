@@ -14,7 +14,7 @@ const SignupSchema = z.object({
  
 export async function POST(_req_: Request) {
   await ensureAuthSchema();
-  const json = await req.json().catch(() => null);
+  const json = await _req_.json().catch(() => null);
   const parsed = SignupSchema.safeParse(json);
   if (!parsed.success) {
     return NextResponse.json({ detail: "Invalid input." }, { status: 400 });
