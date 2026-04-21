@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 from google import genai
+import google.auth
 from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.constants import END
@@ -39,17 +40,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 logger.info(f"🚀 UI Designer Agent Started - Log file: {log_file}")
-from google import genai
-from langchain_core.messages import HumanMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.constants import END
-from langgraph.graph import StateGraph
-from pydantic import BaseModel, Field
-from PIL import Image
 
-load_dotenv()
+_llm_instance: Optional[ChatGoogleGenerativeAI] = None
+_vertex_init_lock = threading.Lock()
+_vertex_initialized = False
 
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+
+def _get_llm() -> ChatGoogleGenerativeAI:
+    """Lazily create the LLM so import-time errors do not crash app startup."""
+    global _llm_instance
+    if _llm_instance is not None:
+        return _llm_instance
+
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if api_key:
+        _llm_instance = ChatGoogleGenerativeAI(model="gemini-2.5-flash", api_key=api_key)
+        return _llm_instance
+
+    # Fallback to Vertex credentials when API key is not provided.
+    creds, project = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    _llm_instance = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        credentials=creds,
+        project=project or os.getenv("GOOGLE_CLOUD_PROJECT"),
+        location=os.getenv("GOOGLE_CLOUD_LOCATION", "global"),
+        vertexai=True,
+    )
+    return _llm_instance
 
 # Track images being generated per session (for streaming to frontend)
 _session_images: dict = {}  # session_id -> {"images": [], "lock": threading.Lock()}
@@ -1108,7 +1125,7 @@ def _describe_reference_image_base64(base64_data: str) -> str:
 
 def _describe_image_from_base64(b64_data: str, mime: str) -> str:
     try:
-        resp = llm.invoke([
+        resp = _get_llm().invoke([
             HumanMessage(content=[
                 {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64_data}"}},
                 {"type": "text", "text": DESCRIBE_IMAGE_PROMPT},
@@ -1123,16 +1140,105 @@ def _describe_image_from_base64(b64_data: str, mime: str) -> str:
 # IMAGE GENERATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _generate_image_bytes(prompt_text: str) -> bytes:
-    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-    response = await client.aio.models.generate_content(
-        model="gemini-3.1-flash-image-preview",
-        contents=prompt_text,
-    )
-    for part in response.candidates[0].content.parts:
-        if part.inline_data:
-            return part.inline_data.data
+def _looks_like_image_bytes(data: bytes) -> bool:
+    signatures = [
+        b"\x89PNG\r\n\x1a\n",  # PNG
+        b"\xff\xd8\xff",  # JPEG
+        b"GIF87a",  # GIF
+        b"GIF89a",  # GIF
+        b"RIFF",  # WEBP starts with RIFF....WEBP
+    ]
+
+    if any(data.startswith(sig) for sig in signatures):
+        return True
+
+    if data.startswith(b"RIFF") and b"WEBP" in data[:16]:
+        return True
+
+    return False
+
+
+def _normalize_inline_image_bytes(inline_data) -> bytes:
+    data = inline_data.data
+
+    if isinstance(data, str):
+        return base64.b64decode(data)
+
+    # Most SDK responses already provide raw bytes. Keep as-is if signature matches.
+    if _looks_like_image_bytes(data):
+        return data
+
+    # Fallback: some responses can still contain base64 text in bytes form.
+    try:
+        decoded = base64.b64decode(data, validate=True)
+        if _looks_like_image_bytes(decoded):
+            return decoded
+    except Exception:
+        pass
+
+    return data
+
+
+def _extract_first_image_bytes_from_genai_response(response) -> bytes:
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        raise RuntimeError("No candidates returned by model")
+
+    for candidate in candidates:
+        parts = getattr(getattr(candidate, "content", None), "parts", None) or []
+        for part in parts:
+            inline_data = getattr(part, "inline_data", None)
+            mime_type = getattr(inline_data, "mime_type", "") if inline_data else ""
+            if inline_data and mime_type.startswith("image/"):
+                return _normalize_inline_image_bytes(inline_data)
+
+    # Fallback: accept first inline_data if mime_type is missing in response.
+    for candidate in candidates:
+        parts = getattr(getattr(candidate, "content", None), "parts", None) or []
+        for part in parts:
+            inline_data = getattr(part, "inline_data", None)
+            if inline_data:
+                return _normalize_inline_image_bytes(inline_data)
+
     raise RuntimeError("No image data returned by model")
+
+def _ensure_vertex_initialized() -> None:
+    global _vertex_initialized
+    if _vertex_initialized:
+        return
+
+    with _vertex_init_lock:
+        if _vertex_initialized:
+            return
+
+        import vertexai
+
+        creds, project = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        project_id = project or os.getenv("GOOGLE_CLOUD_PROJECT", "joblynk-489820")
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+        vertexai.init(project=project_id, location=location, credentials=creds)
+        _vertex_initialized = True
+        logger.info(f"✅ Vertex AI initialized | project={project_id} location={location}")
+
+
+def _generate_image_bytes(prompt_text: str, model_name: str) -> bytes:
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if api_key:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt_text,
+        )
+        return _extract_first_image_bytes_from_genai_response(response)
+
+    from vertexai.generative_models import GenerativeModel
+
+    _ensure_vertex_initialized()
+    model = GenerativeModel(model_name)
+    response = model.generate_content(prompt_text)
+    return _extract_first_image_bytes_from_genai_response(response)
 
 
 def _save_image_bytes(image_bytes: bytes, path: Path) -> None:
@@ -1143,24 +1249,46 @@ def _save_image_bytes(image_bytes: bytes, path: Path) -> None:
 def _generate_image_sync(prompt_text: str, max_retries: int = 3) -> bytes:
     """Synchronous wrapper with exponential-backoff retry."""
     import time
+    model_chain = [
+        "gemini-3.1-flash-image-preview",
+        "gemini-2.5-flash-image",
+    ]
     last_error = None
-    for attempt in range(max_retries):
-        try:
-            return asyncio.run(_generate_image_bytes(prompt_text))
-        except Exception as e:
-            last_error = e
-            err = str(e).lower()
-            if any(x in err for x in ["ssl", "decryption", "connection", "timeout", "503", "429"]):
-                if attempt < max_retries - 1:
-                    wait = 2 ** attempt
-                    print(f"[Retry {attempt + 1}/{max_retries}] waiting {wait}s — {str(e)[:80]}")
-                    import time as _t; _t.sleep(wait)
-                    continue
-            raise
+    for model_name in model_chain:
+        for attempt in range(max_retries):
+            try:
+                return _generate_image_bytes(prompt_text, model_name)
+            except Exception as e:
+                last_error = e
+                err = str(e).lower()
+                transient_markers = [
+                    "ssl",
+                    "decryption",
+                    "bad_decrypt",
+                    "bad record mac",
+                    "tsi_data_corrupted",
+                    "stream removed",
+                    "connection",
+                    "timeout",
+                    "temporarily unavailable",
+                    "503",
+                    "429",
+                ]
+                if any(x in err for x in transient_markers):
+                    if attempt < max_retries - 1:
+                        wait = 2 ** attempt
+                        logger.warning(
+                            f"Retry {attempt + 1}/{max_retries} | model={model_name} "
+                            f"wait={wait}s | err={str(e)[:120]}"
+                        )
+                        time.sleep(wait)
+                        continue
+                # Try next model when this model cannot satisfy request.
+                break
     raise last_error or RuntimeError("Image generation failed after retries")
 
 
-def _generate_images_threaded(page_prompts: list, num_images: int, max_workers: int = 4) -> list:
+def _generate_images_threaded(page_prompts: list, num_images: int, max_workers: int = 2) -> list:
     """Generate all page images in parallel threads."""
     import logging
     logger = logging.getLogger(__name__)
@@ -1285,9 +1413,9 @@ def ui_chatbot_node(state: dict) -> dict:
     prompt = _build_intent_prompt(user_message, None if ignore_last_brief else last_brief, chat_history)
 
     try:
-        resp = llm.with_structured_output(UIIntentResponse).invoke(prompt)
+        resp = _get_llm().with_structured_output(UIIntentResponse).invoke(prompt)
     except Exception:
-        raw = llm.invoke(prompt)
+        raw = _get_llm().invoke(prompt)
         data = _extract_json(getattr(raw, "content", str(raw)))
         resp = UIIntentResponse.model_validate(data)
 
@@ -1392,9 +1520,9 @@ def document_processor_node(state: dict) -> dict:
     prompt = _build_document_processor_prompt(doc_text)
 
     try:
-        resp = llm.with_structured_output(DocumentAnalysis).invoke(prompt)
+        resp = _get_llm().with_structured_output(DocumentAnalysis).invoke(prompt)
     except Exception:
-        raw = llm.invoke(prompt)
+        raw = _get_llm().invoke(prompt)
         data = _extract_json(getattr(raw, "content", str(raw)))
         resp = DocumentAnalysis.model_validate(data)
 
