@@ -6,4 +6,5 @@ Pillow==10.4.0
 langgraph==0.2.24
 langchain-core==0.3.21
 langchain-google-genai==2.0.5
+langchain-google-vertexai==2.0.8
 google-genai==0.7.0

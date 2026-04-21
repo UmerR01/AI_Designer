@@ -16,6 +16,10 @@ from google import genai
 import google.auth
 from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+try:
+    from langchain_google_vertexai import ChatVertexAI
+except Exception:
+    ChatVertexAI = None
 from langgraph.constants import END
 from langgraph.graph import StateGraph
 from pydantic import BaseModel, Field
@@ -41,12 +45,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info(f"🚀 UI Designer Agent Started - Log file: {log_file}")
 
-_llm_instance: Optional[ChatGoogleGenerativeAI] = None
+_llm_instance = None
 _vertex_init_lock = threading.Lock()
 _vertex_initialized = False
 
 
-def _get_llm() -> ChatGoogleGenerativeAI:
+def _get_llm():
     """Lazily create the LLM so import-time errors do not crash app startup."""
     global _llm_instance
     if _llm_instance is not None:
@@ -58,12 +62,28 @@ def _get_llm() -> ChatGoogleGenerativeAI:
         return _llm_instance
 
     # Fallback to Vertex credentials when API key is not provided.
+    # Prefer ChatVertexAI to avoid accidental API-key endpoint auth paths.
     creds, project = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    project_id = project or os.getenv("GOOGLE_CLOUD_PROJECT")
+    location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+
+    if ChatVertexAI is not None:
+        _llm_instance = ChatVertexAI(
+            model="gemini-2.5-flash",
+            credentials=creds,
+            project=project_id,
+            location=location,
+            temperature=0.2,
+        )
+        logger.info(f"✅ LLM initialized via Vertex AI | project={project_id} location={location}")
+        return _llm_instance
+
+    logger.warning("langchain-google-vertexai not installed; falling back to ChatGoogleGenerativeAI(vertexai=True)")
     _llm_instance = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         credentials=creds,
-        project=project or os.getenv("GOOGLE_CLOUD_PROJECT"),
-        location=os.getenv("GOOGLE_CLOUD_LOCATION", "global"),
+        project=project_id,
+        location=location,
         vertexai=True,
     )
     return _llm_instance
