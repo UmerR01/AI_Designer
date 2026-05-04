@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Paperclip, Send, X } from "lucide-react";
+import { Paperclip, RefreshCw, Send, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -45,9 +45,36 @@ type WsPayload =
   }
   | { type: "error"; message?: string; data?: any; timestamp?: string };
 
-const DEFAULT_BACKEND = process.env.NEXT_PUBLIC_UIDESIGNER_BACKEND_URL || "http://localhost:8002";
+type OutboundWsPayload = {
+  message: string;
+  session_id: string;
+  project_id: string;
+  reference_image?: string | null;
+};
+
+const WS_INITIAL_BACKOFF_MS = 800;
+const WS_MAX_BACKOFF_MS = 30_000;
+const WS_OUTBOUND_QUEUE_CAP = 20;
+
+function nextReconnectDelayMs(attemptIndex: number): number {
+  const capped = Math.min(WS_INITIAL_BACKOFF_MS * 2 ** attemptIndex, WS_MAX_BACKOFF_MS);
+  const jitter = capped * (0.88 + Math.random() * 0.24);
+  return Math.round(jitter);
+}
+
+/** Base URL for UI designer FastAPI (WebSocket + uploads). Set in `.env.local` as `NEXT_PUBLIC_UIDESIGNER_BACKEND_URL`. */
+const UIDESIGNER_BACKEND_BASE =
+  process.env.NEXT_PUBLIC_UIDESIGNER_BACKEND_URL?.trim() || "http://localhost:8002";
+
 function projectSessionKey(projectId: string) {
   return `uiDesignerSession.${projectId}`;
+}
+
+function createSessionId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `session-${crypto.randomUUID()}`;
+  }
+  return `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function toWsBase(backendBase: string) {
@@ -115,8 +142,6 @@ export function UIDesignerEditorChatPanel({
   projectId: string;
   onImagesChange?: (images: UiDesignerImage[]) => void;
 }) {
-  const [backendBase, setBackendBase] = useState<string>(DEFAULT_BACKEND);
-
   const [sessionId, setSessionId] = useState<string>("");
   const lastIntentRef = useRef<GenerationIntent>("generic");
   const [storedDocument, setStoredDocument] = useState<string | null>(null);
@@ -127,8 +152,18 @@ export function UIDesignerEditorChatPanel({
   const imageIdSetRef = useRef<Set<string>>(new Set());
 
   const [draft, setDraft] = useState("");
-  const [wsStatus, setWsStatus] = useState<"disconnected" | "connecting" | "connected" | "error">("disconnected");
+  const [wsStatus, setWsStatus] = useState<"disconnected" | "connecting" | "reconnecting" | "connected" | "error">(
+    "disconnected",
+  );
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [queuedSendCount, setQueuedSendCount] = useState(0);
   const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const outboundQueueRef = useRef<OutboundWsPayload[]>([]);
+  const unmountedRef = useRef(false);
+  const queuedToastShownRef = useRef(false);
+  const prevWsSessionRef = useRef<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const draftRef = useRef(draft);
@@ -175,38 +210,116 @@ export function UIDesignerEditorChatPanel({
         if (!img?.id) continue;
         if (set.has(img.id)) continue;
         set.add(img.id);
-        nextImages.push({ ...img, url: getImageSrc(backendBase, img.url) });
+        nextImages.push({ ...img, url: getImageSrc(UIDESIGNER_BACKEND_BASE, img.url) });
       }
       if (!nextImages.length) return;
       setImages((prev) => [...prev, ...nextImages]);
     },
-    [backendBase, setImages],
+    [setImages],
   );
 
-  const closeWs = useCallback(() => {
-    try {
-      wsRef.current?.close();
-    } catch {
-      // ignore
+  const clearReconnectTimer = useCallback(() => {
+    if (reconnectTimerRef.current != null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
     }
-    wsRef.current = null;
   }, []);
 
-  const connectWebSocket = useCallback(
-    (base: string, sid: string) => {
-      if (!sid) return;
-      closeWs();
+  const flushOutboundQueue = useCallback(() => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    while (outboundQueueRef.current.length > 0) {
+      const payload = outboundQueueRef.current[0];
+      try {
+        ws.send(JSON.stringify(payload));
+        outboundQueueRef.current.shift();
+      } catch {
+        break;
+      }
+    }
+    setQueuedSendCount(outboundQueueRef.current.length);
+    if (outboundQueueRef.current.length === 0) {
+      queuedToastShownRef.current = false;
+    }
+  }, []);
+
+  const openSocketRef = useRef<(() => void) | null>(null);
+
+  // Per-project UI designer session id (persisted so refresh keeps server session).
+  useEffect(() => {
+    try {
+      const skey = projectSessionKey(projectId);
+      let sid = window.localStorage.getItem(skey);
+      if (!sid) {
+        sid = createSessionId();
+        window.localStorage.setItem(skey, sid);
+      }
+      setSessionId(sid);
+    } catch {
+      setSessionId(createSessionId());
+    }
+  }, [projectId]);
+
+  // WebSocket lifecycle: connect, auto-reconnect with backoff, outbound queue flush on open
+  useEffect(() => {
+    unmountedRef.current = false;
+    clearReconnectTimer();
+    reconnectAttemptRef.current = 0;
+    setReconnectAttempt(0);
+
+    const base = UIDESIGNER_BACKEND_BASE.trim();
+    const sid = sessionId;
+    const sessionChanged = prevWsSessionRef.current !== null && prevWsSessionRef.current !== sid;
+    if (sessionChanged) {
+      outboundQueueRef.current = [];
+      setQueuedSendCount(0);
+      queuedToastShownRef.current = false;
+    }
+    prevWsSessionRef.current = sid;
+
+    if (!sid) return;
+
+    const scheduleReconnect = () => {
+      if (unmountedRef.current) return;
+      clearReconnectTimer();
+      const attemptIdx = reconnectAttemptRef.current;
+      const delay = nextReconnectDelayMs(attemptIdx);
+      reconnectAttemptRef.current = attemptIdx + 1;
+      setReconnectAttempt(attemptIdx + 1);
+      setWsStatus("reconnecting");
+
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null;
+        if (unmountedRef.current) return;
+        openSocket();
+      }, delay);
+    };
+
+    const openSocket = () => {
+      const w = wsRef.current;
+      if (w) {
+        try {
+          w.close();
+        } catch {
+          // ignore
+        }
+        wsRef.current = null;
+      }
 
       const wsBase = toWsBase(base);
       const wsUrl = `${wsBase}/ws-ui/${sid}`;
+      setWsStatus(reconnectAttemptRef.current > 0 ? "reconnecting" : "connecting");
 
-      setWsStatus("connecting");
       try {
         const socket = new WebSocket(wsUrl);
         wsRef.current = socket;
 
         socket.onopen = () => {
+          if (unmountedRef.current) return;
+          reconnectAttemptRef.current = 0;
+          setReconnectAttempt(0);
           setWsStatus("connected");
+          flushOutboundQueue();
         };
 
         socket.onmessage = (event) => {
@@ -248,44 +361,48 @@ export function UIDesignerEditorChatPanel({
         };
 
         socket.onerror = () => {
-          setWsStatus("error");
-          toast.error("UI backend websocket error. Check backend URL and try again.");
+          // Browser gives no useful detail; onclose handles reconnect. Avoid blaming "URL" for every blip.
         };
 
-        socket.onclose = () => {
-          setWsStatus("disconnected");
+        socket.onclose = (ev) => {
+          if (ev.target !== wsRef.current) return;
+          wsRef.current = null;
+          if (unmountedRef.current) {
+            setWsStatus("disconnected");
+            return;
+          }
+          scheduleReconnect();
         };
-      } catch (e: any) {
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
         setWsStatus("error");
-        toast.error(e?.message ?? "Could not connect to UI backend.");
+        toast.error(msg || "Could not connect to UI backend.");
+        scheduleReconnect();
       }
-    },
-    [addMessage, closeWs, mergeImages],
-  );
+    };
 
-  // Init per-project session + backend URL
-  useEffect(() => {
-    try {
-      setBackendBase(DEFAULT_BACKEND);
+    openSocketRef.current = openSocket;
+    openSocket();
 
-      const skey = projectSessionKey(projectId);
-      let sid = window.localStorage.getItem(skey);
-      if (!sid) {
-        sid = `session-${Date.now()}`;
-        window.localStorage.setItem(skey, sid);
+    return () => {
+      unmountedRef.current = true;
+      clearReconnectTimer();
+      const w = wsRef.current;
+      wsRef.current = null;
+      try {
+        w?.close();
+      } catch {
+        // ignore
       }
-      setSessionId(sid);
-    } catch {
-      setBackendBase(DEFAULT_BACKEND);
-    }
-  }, [projectId]);
+    };
+  }, [sessionId, addMessage, mergeImages, clearReconnectTimer, flushOutboundQueue]);
 
-  // Connect when backendBase + sessionId are ready
-  useEffect(() => {
-    if (!backendBase || !sessionId) return;
-    connectWebSocket(backendBase, sessionId);
-    return () => closeWs();
-  }, [backendBase, sessionId, connectWebSocket, closeWs]);
+  const retryConnectNow = useCallback(() => {
+    clearReconnectTimer();
+    reconnectAttemptRef.current = 0;
+    setReconnectAttempt(0);
+    openSocketRef.current?.();
+  }, [clearReconnectTimer]);
 
   const onPickFile = useCallback(() => {
     fileInputRef.current?.click();
@@ -293,7 +410,7 @@ export function UIDesignerEditorChatPanel({
 
   const uploadFile = useCallback(
     async (file: File) => {
-      const base = backendBase.trim();
+      const base = UIDESIGNER_BACKEND_BASE.trim();
       if (!base) return;
       if (!file) return;
       if (file.size > 20 * 1024 * 1024) {
@@ -338,24 +455,24 @@ export function UIDesignerEditorChatPanel({
         addMessage("system", `Upload error: ${e?.message ?? String(e)}`);
       }
     },
-    [addMessage, backendBase],
+    [addMessage],
   );
 
   const sendToBackend = useCallback(() => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      toast.error("Not connected to UI backend.");
-      return;
-    }
     const text = draftRef.current.trim();
     if (!text) return;
     if (!sessionId) return;
+
+    const socketOpen = Boolean(wsRef.current && wsRef.current.readyState === WebSocket.OPEN);
+    if (!socketOpen && outboundQueueRef.current.length >= WS_OUTBOUND_QUEUE_CAP) {
+      toast.error("Too many messages are waiting to send. Wait for the connection or use Retry.");
+      return;
+    }
 
     const userText = text;
     setDraft("");
     addMessage("user", userText);
 
-    // Replicate ui-designer-project frontend behavior + add robust type-switch handling.
     const currentIntent = inferIntentFromPrompt(userText);
     const previousIntent = lastIntentRef.current;
     const switchedIntent =
@@ -375,11 +492,41 @@ export function UIDesignerEditorChatPanel({
     finalMessage = `${finalMessage}\n\n[GENERATION SPEC]\n${intentInstruction(currentIntent)}`;
     lastIntentRef.current = currentIntent;
 
-    const msg: any = { message: finalMessage, session_id: sessionId, project_id: projectId };
-    if (referenceImage) msg.reference_image = referenceImage;
+    const refImg = referenceImage;
+    if (referenceImage) setReferenceImage(null);
 
-    ws.send(JSON.stringify(msg));
-  }, [addMessage, referenceImage, sessionId, storedDocument]);
+    const msg: OutboundWsPayload = {
+      message: finalMessage,
+      session_id: sessionId,
+      project_id: projectId,
+    };
+    if (refImg) msg.reference_image = refImg;
+
+    const sendNow = () => {
+      const w = wsRef.current;
+      if (!w || w.readyState !== WebSocket.OPEN) return false;
+      try {
+        w.send(JSON.stringify(msg));
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    if (sendNow()) return;
+
+    if (outboundQueueRef.current.length >= WS_OUTBOUND_QUEUE_CAP) {
+      toast.error("Too many messages are waiting to send. Wait for the connection or use Retry.");
+      return;
+    }
+
+    outboundQueueRef.current.push(msg);
+    setQueuedSendCount(outboundQueueRef.current.length);
+    if (!queuedToastShownRef.current) {
+      queuedToastShownRef.current = true;
+      toast.message("Connection lost. Your message is queued and will send automatically when the link is back.");
+    }
+  }, [addMessage, projectId, referenceImage, sessionId, storedDocument]);
 
   const clearReference = useCallback(() => {
     setReferenceImage(null);
@@ -393,6 +540,32 @@ export function UIDesignerEditorChatPanel({
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
+      {(wsStatus === "connecting" || wsStatus === "reconnecting") && (
+        <div className="shrink-0 flex items-center justify-between gap-2 border-b border-white/10 bg-white/[0.04] px-4 py-2 text-[0.72rem] text-white/80">
+          <span className="min-w-0 truncate">
+            {wsStatus === "reconnecting"
+              ? `Reconnecting to UI backend… (attempt ${reconnectAttempt})`
+              : "Connecting to UI backend…"}
+          </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 shrink-0 gap-1.5 text-white/90 hover:text-white hover:bg-white/10"
+            onClick={() => retryConnectNow()}
+          >
+            <RefreshCw className="size-3.5" />
+            Retry now
+          </Button>
+        </div>
+      )}
+
+      {queuedSendCount > 0 && (
+        <div className="shrink-0 border-b border-amber-500/25 bg-amber-500/10 px-4 py-1.5 text-center text-[0.7rem] text-amber-100/90">
+          {queuedSendCount} message{queuedSendCount === 1 ? "" : "s"} queued — will send when connected
+        </div>
+      )}
+
       <div className="p-6 pb-2 space-y-3 thin-scrollbar overflow-y-auto flex-1">
         {storedDocument ? (
           <div className="rounded-2xl border border-[#eca8d6]/20 bg-[#eca8d6]/5 p-3 flex items-center justify-between gap-3">
@@ -467,7 +640,8 @@ export function UIDesignerEditorChatPanel({
               className="size-9 rounded-xl bg-white text-black hover:bg-zinc-200 shadow-xl transition-all"
               type="button"
               onClick={sendToBackend}
-              disabled={wsStatus !== "connected" || !draft.trim()}
+              disabled={!draft.trim()}
+              title={wsStatus !== "connected" ? "Sends when connected (or queues if offline)" : "Send"}
             >
               <Send className="size-3.5 fill-current" />
             </Button>

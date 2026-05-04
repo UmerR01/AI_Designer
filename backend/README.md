@@ -13,5 +13,5 @@
    python app.py
    ```
 
-WebSocket endpoint: ws://localhost:8000/ws-ui/{session_id}
-Static images: http://localhost:8000/ui_designs/
+WebSocket endpoint: ws://localhost:8002/ws-ui/{session_id} (see `port=` in `app.py` if you change it)
+Static images: http://localhost:8002/ui_designs/
