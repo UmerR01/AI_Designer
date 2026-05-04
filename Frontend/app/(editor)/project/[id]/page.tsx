@@ -326,7 +326,11 @@ export default function ProjectEditorPage() {
   const [me, setMe] = useState<MeResponse["user"]>(null);
   const [generatedUiImages, setGeneratedUiImages] = useState<GeneratedUiImage[]>([]);
   const mergeGeneratedUiImages = useCallback((incoming: GeneratedUiImage[]) => {
-    if (!Array.isArray(incoming) || incoming.length === 0) return;
+    if (!Array.isArray(incoming)) return;
+    if (incoming.length === 0) {
+      setGeneratedUiImages([]);
+      return;
+    }
     setGeneratedUiImages((prev) => {
       const merged = dedupeGeneratedImages([...prev, ...incoming]);
       if (merged.length === prev.length) {

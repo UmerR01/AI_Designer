@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { sql } from "@/lib/db";
+import { dbConnectionErrorResponse } from "@/lib/db-connection-error";
 import { ensureAuthSchema } from "@/lib/auth/bootstrap";
 import { SESSION_COOKIE_NAME, signSession } from "@/lib/auth/session";
  
@@ -13,7 +14,13 @@ const SignupSchema = z.object({
 });
  
 export async function POST(_req_: Request) {
-  await ensureAuthSchema();
+  try {
+    await ensureAuthSchema();
+  } catch (err: unknown) {
+    const r = dbConnectionErrorResponse(err);
+    if (r) return r;
+    throw err;
+  }
   const json = await _req_.json().catch(() => null);
   const parsed = SignupSchema.safeParse(json);
   if (!parsed.success) {
@@ -51,7 +58,10 @@ export async function POST(_req_: Request) {
       maxAge: maxAgeSeconds,
     });
     return res;
-  } catch (_e_: any) {
+  } catch (err: unknown) {
+    const r = dbConnectionErrorResponse(err);
+    if (r) return r;
+    const e = err as { code?: string; message?: string };
     if (e?.code === "23505") {
       return NextResponse.json({ detail: "An account with that email already exists." }, { status: 409 });
     }

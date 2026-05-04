@@ -1,9 +1,13 @@
 #!/usr/bin/env node
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import dotenv from "dotenv";
 
-dotenv.config({ path: ".env.local" });
-dotenv.config();
+const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// Base defaults, then .env.local wins (including over inherited shell DATABASE_URL).
+dotenv.config({ path: path.join(frontendRoot, ".env") });
+dotenv.config({ path: path.join(frontendRoot, ".env.local"), override: true });
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {

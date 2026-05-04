@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { sql } from "@/lib/db";
+import { dbConnectionErrorResponse } from "@/lib/db-connection-error";
 import { ensureAuthSchema } from "@/lib/auth/bootstrap";
 import { SESSION_COOKIE_NAME, signSession } from "@/lib/auth/session";
  
@@ -12,7 +13,13 @@ const LoginSchema = z.object({
 });
  
 export async function POST(_req_: Request) {
-  await ensureAuthSchema();
+  try {
+    await ensureAuthSchema();
+  } catch (err: unknown) {
+    const r = dbConnectionErrorResponse(err);
+    if (r) return r;
+    throw err;
+  }
   const json = await _req_.json().catch(() => null);
   const parsed = LoginSchema.safeParse(json);
   if (!parsed.success) {
@@ -43,7 +50,9 @@ export async function POST(_req_: Request) {
       where email = ${email.toLowerCase()}
       limit 1
     `;
-  } catch {
+  } catch (err: unknown) {
+    const r = dbConnectionErrorResponse(err);
+    if (r) return r;
     return NextResponse.json({ detail: "Sign in failed. Database not ready." }, { status: 500 });
   }
  
