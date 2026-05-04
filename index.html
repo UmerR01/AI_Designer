@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>UI Designer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Public+Sans:wght@300;400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="app-header">
+        <div class="brand">
+          <span class="brand-tag">Studio</span>
+          <h1>UI Designer</h1>
+          <p>Design system-aware screens that feel like production UX.</p>
+        </div>
+        <div class="backend-config">
+          <label for="backendUrl">Backend URL</label>
+          <input id="backendUrl" type="text" placeholder="http://localhost:8000" />
+          <button id="newSession" type="button" class="secondary">New Session</button>
+          <button id="saveBackend">Connect</button>
+        </div>
+      </header>
+
+      <main class="app-body">
+        <section class="assistant-card">
+          <div class="assistant-header">
+            <div>
+              <h2>Design Concierge</h2>
+              <p>Clarify requirements, then generate polished layouts.</p>
+            </div>
+            <span class="status-pill" id="connectionStatus">Offline</span>
+          </div>
+          <div class="chat-panel" id="chatPanel"></div>
+          
+          <div class="upload-zone" id="uploadZone">
+            <input type="file" id="fileInput" accept=".pdf,.docx,.png,.jpg,.jpeg,.webp" hidden />
+            <div class="upload-content">
+              <p>📎 Drag PDF/DOCX/Image or <a href="#" id="selectFile">click to upload</a></p>
+            </div>
+          </div>
+          
+          <form class="chat-input" id="chatForm">
+            <textarea id="chatText" rows="3" placeholder="Describe the UI you want... (Ctrl+Enter to send)"></textarea>
+            <button type="submit" id="sendButton">Send</button>
+          </form>
+          <p class="chat-hint">Examples: "Generate a sign up, login, and forgot password flow", "Skip the pricing page"</p>
+        </section>
+
+        <section class="canvas-card">
+          <div class="canvas-header">
+            <div>
+              <h2>Canvas</h2>
+              <p>Multi-page boards with consistent styling.</p>
+            </div>
+            <div class="canvas-metrics">
+              <div class="metric">
+                <span class="label">Pages</span>
+                <span class="value" id="pageCount">0</span>
+              </div>
+              <div class="metric">
+                <span class="label">Last update</span>
+                <span class="value" id="lastUpdate">—</span>
+              </div>
+            </div>
+          </div>
+          <div class="gallery-grid" id="galleryGrid"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

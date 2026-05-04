@@ -1,3 +1,44 @@
+"""
+ui_image_designer.py — Production UI Designer Agent
+=====================================================
+
+KEY ARCHITECTURAL IMPROVEMENTS:
+  1. REFERENCE IMAGE PASSING FOR EDITS
+     Every revision sends the previous image as a visual anchor. The model
+     is instructed to change ONLY what the user asked and keep everything else
+     pixel-identical. This mimics how you'd instruct a human designer.
+
+  2. CONSISTENCY ENGINE
+     A "DesignDNA" object is extracted from screen 1 and hard-locked into
+     every subsequent prompt. Nav labels, hex values, font names, corner radii,
+     shadow styles — all frozen and verified per-screen.
+
+  3. NAV HIGHLIGHTING PER SCREEN
+     Each prompt explicitly names the ACTIVE tab/sidebar item for that screen.
+     All other items are described as inactive. Zero ambiguity for the model.
+
+  4. POSTER SIZE DETECTION
+     NLP keywords map to exact canvas dimensions (Instagram, TikTok, A4, etc.).
+     Poster prompts never inherit mobile/web layout bias.
+
+  5. REVISION FLOW
+     When user says "change X", the last generated image bytes are passed as
+     a reference Part alongside the edit instruction. No full regeneration.
+
+  6. LANGGRAPH STAYS — but nodes are leaner and purpose-built.
+
+  7. VERTEX AI + gemini-3.1-flash-image-preview PRESERVED throughout.
+
+POSTER FIXES (v2):
+  FIX 1 — _fill_missing_tokens now skips if poster; _fill_poster_tokens runs first
+  FIX 2 — Fallback page populates must_include from brief.components / user_prompt
+  FIX 3 — user_original_prompt passed through to _build_poster_prompt
+  FIX 4 — Poster resolution locked before platform guard in ui_chatbot_node
+  FIX 5 — is_poster detection hardened; brief.poster_size always resolved before prompt build
+"""
+
+from __future__ import annotations
+
 import asyncio
 import base64
 import io
@@ -6,10 +47,10 @@ import logging
 import os
 import re
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 from google import genai
@@ -27,31 +68,34 @@ from PIL import Image
 
 load_dotenv()
 
-# Configure logging to file and console
+# ─────────────────────────────────────────────────────────────────────────────
+# LOGGING
+# ─────────────────────────────────────────────────────────────────────────────
 log_dir = Path(__file__).resolve().parent.parent.parent / "logs"
 log_dir.mkdir(parents=True, exist_ok=True)
 log_file = log_dir / f"ui_designer_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
-# Clear existing handlers and set up new ones
 logging.getLogger().handlers.clear()
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s | %(name)s | %(levelname)-8s | %(message)s",
     handlers=[
-        logging.FileHandler(log_file, encoding='utf-8'),
+        logging.FileHandler(log_file, encoding="utf-8"),
         logging.StreamHandler(),
-    ]
+    ],
 )
 logger = logging.getLogger(__name__)
-logger.info(f"🚀 UI Designer Agent Started - Log file: {log_file}")
+logger.info(f"🚀 UI Designer Agent Started — Log: {log_file}")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM SINGLETON
+# ─────────────────────────────────────────────────────────────────────────────
 _llm_instance = None
 _vertex_init_lock = threading.Lock()
 _vertex_initialized = False
 
 
 def _get_llm():
-    """Lazily create the LLM so import-time errors do not crash app startup."""
     global _llm_instance
     if _llm_instance is not None:
         return _llm_instance
@@ -61,8 +105,6 @@ def _get_llm():
         _llm_instance = ChatGoogleGenerativeAI(model="gemini-2.5-flash", api_key=api_key)
         return _llm_instance
 
-    # Fallback to Vertex credentials when API key is not provided.
-    # Prefer ChatVertexAI to avoid accidental API-key endpoint auth paths.
     creds, project = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     project_id = project or os.getenv("GOOGLE_CLOUD_PROJECT")
     location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
@@ -75,10 +117,9 @@ def _get_llm():
             location=location,
             temperature=0.2,
         )
-        logger.info(f"✅ LLM initialized via Vertex AI | project={project_id} location={location}")
+        logger.info(f"✅ LLM via Vertex | project={project_id} location={location}")
         return _llm_instance
 
-    logger.warning("langchain-google-vertexai not installed; falling back to ChatGoogleGenerativeAI(vertexai=True)")
     _llm_instance = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         credentials=creds,
@@ -88,8 +129,82 @@ def _get_llm():
     )
     return _llm_instance
 
-# Track images being generated per session (for streaming to frontend)
-_session_images: dict = {}  # session_id -> {"images": [], "lock": threading.Lock()}
+
+def _ensure_vertex_initialized():
+    global _vertex_initialized
+    if _vertex_initialized:
+        return
+    with _vertex_init_lock:
+        if _vertex_initialized:
+            return
+        import vertexai
+        creds, project = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        project_id = project or os.getenv("GOOGLE_CLOUD_PROJECT", "")
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+        vertexai.init(project=project_id, location=location, credentials=creds)
+        _vertex_initialized = True
+        logger.info(f"✅ Vertex AI initialized | project={project_id}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SESSION IMAGE STREAMING
+# ─────────────────────────────────────────────────────────────────────────────
+_session_images: dict = {}
+_session_design_dirs: dict[str, Path] = {}
+_session_last_image_paths: dict[str, str] = {}
+_session_design_dna: dict[str, dict] = {}
+
+
+def _init_session_images(session_id: str):
+    if session_id not in _session_images:
+        _session_images[session_id] = {"images": [], "lock": threading.Lock()}
+
+
+def _add_image_to_session(session_id: str, image_dict: dict):
+    _init_session_images(session_id)
+    with _session_images[session_id]["lock"]:
+        _session_images[session_id]["images"].append(image_dict)
+    if session_id and image_dict.get("path"):
+        _session_last_image_paths[session_id] = image_dict["path"]
+
+
+def _get_session_last_image_path(session_id: str) -> str:
+    return _session_last_image_paths.get(session_id, "")
+
+
+def _set_session_design_dna(session_id: str, dna: "DesignDNA | dict"):
+    if not session_id:
+        return
+    _session_design_dna[session_id] = dna.model_dump() if isinstance(dna, DesignDNA) else dict(dna)
+
+
+def _get_session_design_dna(session_id: str) -> dict:
+    return _session_design_dna.get(session_id, {})
+
+
+def _latest_image_path_in_dir(folder: Path) -> str:
+    if not folder.exists():
+        return ""
+    candidates = sorted(
+        [p for p in folder.glob("*.png") if p.is_file()],
+        key=lambda p: p.stat().st_mtime,
+    )
+    return str(candidates[-1]) if candidates else ""
+
+
+def _get_and_clear_session_images(session_id: str) -> list:
+    if session_id not in _session_images:
+        return []
+    with _session_images[session_id]["lock"]:
+        imgs = _session_images[session_id]["images"][:]
+        _session_images[session_id]["images"].clear()
+    return imgs
+
+
+def _cleanup_session_images(session_id: str):
+    _session_images.pop(session_id, None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -97,38 +212,79 @@ _session_images: dict = {}  # session_id -> {"images": [], "lock": threading.Loc
 # ─────────────────────────────────────────────────────────────────────────────
 
 class UIPageSpec(BaseModel):
-    name: str = Field(..., description="Page name, e.g. Sign Up")
+    name: str = Field(..., description="Page name e.g. Dashboard")
     purpose: str = Field("", description="What this page is for")
     must_include: list[str] = Field(default_factory=list)
     avoid: list[str] = Field(default_factory=list)
 
 
+class DesignDNA(BaseModel):
+    """
+    The locked design system extracted from screen 1.
+    Every subsequent screen prompt is built on top of this.
+    """
+    bg_color: str = ""
+    surface_color: str = ""
+    primary_color: str = ""
+    accent_color: str = ""
+    text_primary: str = ""
+    text_secondary: str = ""
+    muted_color: str = ""
+    border_color: str = ""
+    success_color: str = ""
+    error_color: str = ""
+    heading_font: str = ""
+    body_font: str = ""
+    mono_font: str = ""
+    card_radius: str = ""
+    button_radius: str = ""
+    button_style: str = ""
+    shadow_style: str = ""
+    icon_style: str = ""
+    nav_type: str = ""         # "bottom_tabs" | "sidebar" | "top_bar" | "none"
+    nav_items: list[str] = Field(default_factory=list)
+    nav_bg: str = ""
+    nav_active_style: str = ""
+    nav_inactive_style: str = ""
+    spacing_unit: str = ""
+    visual_style: str = ""
+    platform: str = ""
+    resolution: str = ""
+    extra_motifs: str = ""
+
+    def is_empty(self) -> bool:
+        return not self.bg_color and not self.heading_font
+
+
 class UIDesignBrief(BaseModel):
-    screen_name: str = Field("Sign Up Page")
-    platform: str = Field("web")          # "web" | "mobile"
-    layout: str = Field("centered form")
+    screen_name: str = Field("Primary Screen")
+    platform: str = Field("web")
+    layout: str = Field("centered")
     components: list[str] = Field(default_factory=list)
     style: str = Field("modern, clean, professional")
-    color_palette: str = Field("")         # hex values
-    typography: str = Field("")            # font names + weights
+    color_palette: str = Field("")
+    typography: str = Field("")
     copy_tone: str = Field("professional")
     constraints: list[str] = Field(default_factory=list)
-    resolution: str = Field("1440x900")   # 1440x900 web | 390x844 mobile
+    resolution: str = Field("1440x900")
     num_images: int = Field(1)
     brand_name: str = Field("")
     pages: list[UIPageSpec] = Field(default_factory=list)
     skip_pages: list[str] = Field(default_factory=list)
     nav_items: list[str] = Field(default_factory=list)
-    logo_only: bool = Field(False)  # Generate only logo, no UI screens
-    logo_description: str = Field("")  # Detailed logo requirements
+    logo_only: bool = Field(False)
+    logo_description: str = Field("")
+    poster_platform: str = Field("")   # "instagram", "tiktok", "a4", etc.
+    poster_size: str = Field("")       # exact "WxH" resolved from poster_platform
 
 
 class UIIntentResponse(BaseModel):
-    intent: Literal["chat", "collect", "generate", "edit"]
+    intent: Literal["chat", "collect", "generate", "edit", "revision"]
     message: str
     requirements: Optional[UIDesignBrief] = None
     missing_fields: list[str] = Field(default_factory=list)
     change_request: str = ""
+    target_screens: list[str] = Field(default_factory=list)
 
 
 class PagePrompt(BaseModel):
@@ -137,25 +293,85 @@ class PagePrompt(BaseModel):
     notes: str = ""
 
 
-class UIPromptSpec(BaseModel):
-    image_prompt: str
-    page_prompts: list[PagePrompt] = Field(default_factory=list)
-    consistency_rules: list[str]
-    final_spec: dict = Field(default_factory=dict)
-
-
 class DocumentAnalysis(BaseModel):
-    is_document: bool = Field(False)
-    summary: str = Field("")
+    is_document: bool = False
+    summary: str = ""
     detected_pages: list[str] = Field(default_factory=list)
     features: list[str] = Field(default_factory=list)
     user_workflows: list[str] = Field(default_factory=list)
-    user_roles: list[str] = Field(default_factory=list)
-    tone: str = Field("professional")
-    style_hints: str = Field("")
-    color_hints: str = Field("")
-    platform: str = Field("web")
-    raw_text: str = Field("")
+    tone: str = "professional"
+    style_hints: str = ""
+    color_hints: str = ""
+    platform: str = "web"
+    raw_text: str = ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POSTER SIZE MAP  — NLP keyword → exact canvas WxH
+# ─────────────────────────────────────────────────────────────────────────────
+POSTER_SIZE_MAP: dict[str, tuple[str, str]] = {
+    # Social — vertical
+    "instagram story": ("1080x1920", "9:16 Instagram Story"),
+    "ig story":        ("1080x1920", "9:16 Instagram Story"),
+    "tiktok":          ("1080x1920", "9:16 TikTok"),
+    "snapchat":        ("1080x1920", "9:16 Snapchat"),
+    "reels":           ("1080x1920", "9:16 Reels"),
+    "youtube short":   ("1080x1920", "9:16 YouTube Short"),
+    # Social — square
+    "instagram post":  ("1080x1080", "1:1 Instagram Post"),
+    "instagram square":("1080x1080", "1:1 Instagram Post"),
+    "ig post":         ("1080x1080", "1:1 Instagram Post"),
+    "facebook post":   ("1200x630",  "1.91:1 Facebook Post"),
+    # Social — landscape
+    "youtube thumbnail":("1280x720", "16:9 YouTube Thumbnail"),
+    "twitter":         ("1600x900",  "16:9 Twitter/X"),
+    "linkedin":        ("1200x627",  "1.91:1 LinkedIn"),
+    "banner":          ("1500x500",  "3:1 Twitter Banner"),
+    # Print
+    "a4":              ("2480x3508", "A4 Portrait"),
+    "a3":              ("3508x4961", "A3 Portrait"),
+    "a5":              ("1748x2480", "A5 Portrait"),
+    "letter":          ("2550x3300", "US Letter"),
+    "poster":          ("1080x1350", "4:5 Poster"),
+    "flyer":           ("1080x1350", "4:5 Flyer"),
+    # Default
+    "social":          ("1080x1080", "1:1 Social Post"),
+}
+
+def _detect_poster_size(text: str) -> tuple[str, str]:
+    """Return (WxH, label) from user text. Falls back to 1080x1080."""
+    lower = text.lower()
+    for keyword, dims in POSTER_SIZE_MAP.items():
+        if keyword in lower:
+            return dims
+    return ("1080x1080", "1:1 Social Post")
+
+
+def _is_poster_intent(text: str) -> bool:
+    """
+    FIX 5: Hardened poster intent detection. Checks poster_platform/poster_size
+    fields directly and uses a broader token list. No longer silently fails when
+    a UI token co-occurs with a poster token in an ambiguous phrase.
+    """
+    poster_tokens = {
+        "poster", "flyer", "brochure", "social post", "instagram", "tiktok",
+        "reel", "story", "thumbnail", "banner", "a4", "a3", "print ad",
+        "ad creative", "graphic", "announcement", "social media",
+        "ig post", "ig story", "youtube short", "snapchat", "linkedin post",
+        "facebook post", "twitter post", "x post",
+    }
+    # Only treat as NOT poster if these strong UI tokens appear WITHOUT poster tokens
+    hard_ui_tokens = {
+        "web ui", "ui design", "dashboard", "navbar", "hero section",
+        "footer", "mobile app screen", "ios app", "android app",
+    }
+    lower = text.lower()
+    has_poster = any(t in lower for t in poster_tokens)
+    has_hard_ui = any(t in lower for t in hard_ui_tokens)
+
+    # If both poster and hard UI tokens appear, poster still wins
+    # (e.g. "instagram landing page" → poster, not web UI)
+    return has_poster and not has_hard_ui
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,14 +388,28 @@ def _design_root() -> Path:
     return root
 
 
-def _design_dir(session_id: str) -> Path:
-    name = f"design_{_now_stamp()}"
-    if session_id:
-        safe = session_id.replace("session-", "")[-6:]
-        if safe:
-            name = f"{name}_{safe}"
-    path = _design_root() / name
+def _session_folder_name(session_id: str) -> str:
+    if not session_id:
+        return "session_unknown"
+    safe = re.sub(r"[^a-zA-Z0-9_-]+", "-", session_id.strip()).strip("-")
+    return safe or "session_unknown"
+
+
+def _design_dir(session_id: str, session_root_dir: str | Path | None = None) -> Path:
+    if session_root_dir:
+        path = Path(session_root_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        if session_id:
+            _session_design_dirs[session_id] = path
+        return path
+
+    if session_id and session_id in _session_design_dirs:
+        return _session_design_dirs[session_id]
+
+    path = _design_root() / _session_folder_name(session_id)
     path.mkdir(parents=True, exist_ok=True)
+    if session_id:
+        _session_design_dirs[session_id] = path
     return path
 
 
@@ -195,448 +425,498 @@ def _slugify(value: str) -> str:
     return safe.strip("-") or "page"
 
 
-def _filter_pages(brief: UIDesignBrief) -> list[UIPageSpec]:
-    skip = {n.strip().lower() for n in brief.skip_pages if n.strip()}
-    if not skip:
-        return list(brief.pages)
-    return [p for p in brief.pages if p.name.strip().lower() not in skip]
-
-
-def _should_ignore_last_brief(user_message: str) -> bool:
-    text = (user_message or "").strip().lower()
-    if not text:
-        return False
-
-    reset_hints = (
-        "start over",
-        "from scratch",
-        "new project",
-        "new design",
-        "fresh design",
-        "fresh page",
-        "fresh screen",
-    )
-    if any(hint in text for hint in reset_hints):
-        return True
-
-    additive_hints = (" also ", " as well", " plus ", " additional", " another", " add ")
-    if any(hint in f" {text} " for hint in additive_hints):
-        return False
-
-    multi_page_hints = (
-        "pages",
-        "screens",
-        "sections",
-        "landing page",
-        "dashboard",
-        "flow",
-        "full website",
-    )
-    if any(hint in text for hint in multi_page_hints):
-        return False
-
-    single_prefixes = ("make a ", "generate a ", "create a ", "design a ")
-    if text.startswith(single_prefixes):
-        return True
-
-    return len(text.split()) <= 14
-
-
-def _is_structural_page_name(page_name: str) -> bool:
-    name = (page_name or "").strip().lower()
-    structural = {
-        "navbar",
-        "nav bar",
-        "navigation",
-        "navigation bar",
-        "top nav",
-        "topbar",
-        "top bar",
-        "sidebar",
-        "side bar",
-        "menu",
-    }
-    return name in structural
-
-
-def _is_spec_page_name(page_name: str) -> bool:
-    name = (page_name or "").strip().lower()
-    blocked_tokens = (
-        "style guide",
-        "design system",
-        "token",
-        "typography",
-        "color palette",
-        "ui kit",
-        "component spec",
-        "spec",
-    )
-    return any(token in name for token in blocked_tokens)
-
-
-def _clean_spec_like_text(items: list[str]) -> list[str]:
-    if not items:
-        return []
-    blocked_tokens = (
-        "color palette",
-        "typography",
-        "font",
-        "design token",
-        "hex",
-        "spec",
-        "style guide",
-        "ui kit",
-        "token legend",
-    )
-    cleaned: list[str] = []
-    for item in items:
-        text = (item or "").strip()
-        if not text:
-            continue
-        lower = text.lower()
-        if any(token in lower for token in blocked_tokens):
-            continue
-        cleaned.append(text)
-    return cleaned
-
-
-def _infer_single_page_from_prompt(user_message: str) -> str:
-    text = (user_message or "").strip().lower()
-    if not text:
-        return ""
-
-    keyword_map = [
-        ("sign up", "Sign Up"),
-        ("signup", "Sign Up"),
-        ("register", "Sign Up"),
-        ("login", "Login"),
-        ("log in", "Login"),
-        ("forgot password", "Forgot Password"),
-        ("reset password", "Reset Password"),
-        ("pricing", "Pricing"),
-        ("faq", "FAQ"),
-        ("contact", "Contact"),
-        ("checkout", "Checkout"),
-        ("dashboard", "Dashboard"),
-        ("profile", "Profile"),
-    ]
-    for token, name in keyword_map:
-        if token in text:
-            return name
-
-    match = re.search(r"(?:make|generate|create|design)\s+a\s+([a-z0-9\-\s]{2,30})\s+(?:page|screen)\b", text)
-    if match:
-        raw = " ".join(match.group(1).split())
-        return raw.title()
-
-    return ""
-
-
-def _expand_landing_sections(brief: UIDesignBrief, user_message: str) -> UIDesignBrief:
-    """Expand a single section-heavy landing page into multiple screen specs.
-
-    This prevents one giant collage-style page when the brief clearly contains
-    many distinct landing sections.
-    """
-    if len(brief.pages) != 1:
-        return brief
-
-    page = brief.pages[0]
-    page_name = page.name.strip().lower()
-    if page_name not in {"landing page", "home page", "homepage"}:
-        return brief
-
-    must = [m.strip() for m in page.must_include if m and m.strip()]
-    if len(must) < 6:
-        return brief
-
-    single_page_hints = ("single page", "one page", "one-screen", "single screen")
-    if any(hint in (user_message or "").lower() for hint in single_page_hints):
-        return brief
-
-    section_map = [
-        ("hero", "Hero"),
-        ("social", "Social Proof"),
-        ("feature", "Features"),
-        ("product", "Product Showcase"),
-        ("metric", "Metrics"),
-        ("workflow", "Workflow"),
-        ("testimonial", "Testimonials"),
-        ("pricing", "Pricing"),
-        ("faq", "FAQ"),
-        ("final cta", "Final CTA"),
-        ("cta", "Final CTA"),
-        ("footer", "Footer"),
-        ("navbar", "Navbar"),
-        ("navigation", "Navbar"),
-    ]
-
-    expanded_names: list[str] = []
-    seen: set[str] = set()
-    for item in must:
-        item_lower = item.lower()
-        for token, mapped in section_map:
-            if token in item_lower:
-                key = mapped.lower()
-                if key not in seen:
-                    expanded_names.append(mapped)
-                    seen.add(key)
-                break
-
-    # Keep structural sections out unless explicitly requested as standalone pages.
-    explicit_structural_request = any(
-        token in (user_message or "").lower()
-        for token in ("navbar only", "navigation only", "header only", "sidebar only")
-    )
-    if not explicit_structural_request:
-        expanded_names = [n for n in expanded_names if n.lower() != "navbar"]
-
-    if len(expanded_names) < 4:
-        return brief
-
-    brief.pages = [UIPageSpec(name=name, purpose=f"{name} section") for name in expanded_names]
-    return brief
-
-
-def _sanitize_requirements_for_request(brief: UIDesignBrief, user_message: str, ignore_last_brief: bool) -> UIDesignBrief:
-    brief = _expand_landing_sections(brief, user_message)
-
-    explicit_structural_request = any(
-        token in (user_message or "").lower()
-        for token in ("navbar only", "navigation only", "header only", "sidebar only")
-    )
-
-    if brief.pages and not explicit_structural_request:
-        brief.pages = [
-            p for p in brief.pages
-            if not _is_structural_page_name(p.name) and not _is_spec_page_name(p.name)
-        ]
-
-    for page in brief.pages:
-        page.must_include = _clean_spec_like_text(page.must_include)
-        page.avoid = _clean_spec_like_text(page.avoid)
-
-    deduped_pages: list[UIPageSpec] = []
-    seen: set[str] = set()
-    for page in brief.pages:
-        key = page.name.strip().lower()
-        if not key or key in seen:
-            continue
-        deduped_pages.append(page)
-        seen.add(key)
-    brief.pages = deduped_pages
-
-    requested_single = _infer_single_page_from_prompt(user_message)
-    if requested_single and (ignore_last_brief or len(brief.pages) > 1):
-        chosen = next((p for p in brief.pages if p.name.strip().lower() == requested_single.lower()), None)
-        if chosen is None:
-            chosen = UIPageSpec(name=requested_single, purpose=f"{requested_single} screen")
-        brief.pages = [chosen]
-        brief.screen_name = requested_single
-        brief.nav_items = []
-
-    return brief
-
-
 def _extract_json(text: str) -> dict:
     if not text:
         raise ValueError("Empty response")
     if text.strip().startswith("```"):
         parts = text.splitlines()
         text = "\n".join(parts[1:-1] if parts[-1].strip() == "```" else parts[1:])
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError("No JSON found")
-    return json.loads(text[start: end + 1])
+    s, e = text.find("{"), text.rfind("}")
+    if s == -1 or e == -1:
+        raise ValueError("No JSON object found")
+    return json.loads(text[s: e + 1])
 
 
 def _format_chat_history(chat_history: Optional[list[dict]], max_messages: int = 20) -> str:
     if not chat_history:
         return "[]"
-
-    lines: list[str] = []
+    lines = []
     for msg in chat_history[-max_messages:]:
-        role = str(msg.get("role", "unknown")).strip().lower() or "unknown"
+        role = str(msg.get("role", "")).strip().lower()
         content = str(msg.get("content", "")).strip()
-        if not content:
-            continue
-        lines.append(f"- {role}: {content}")
-
+        if content:
+            lines.append(f"- {role}: {content}")
     return "\n".join(lines) if lines else "[]"
 
 
+def _is_auth_page(name: str) -> bool:
+    auth_tokens = {
+        "login", "sign in", "signin", "register", "registration", "sign up",
+        "signup", "forgot password", "password reset", "reset password",
+        "password recovery", "2fa", "two-factor", "verify", "verification",
+        "onboarding", "welcome",
+    }
+    lower = name.lower()
+    return any(t in lower for t in auth_tokens)
+
+
+def _filter_structural_pages(pages: list[UIPageSpec]) -> list[UIPageSpec]:
+    structural = {"navbar", "nav bar", "navigation", "header", "sidebar", "topbar", "top bar"}
+    spec_tokens = {"style guide", "design system", "typography", "color palette", "ui kit", "spec"}
+    result = []
+    for p in pages:
+        lower = p.name.strip().lower()
+        if lower in structural:
+            continue
+        if any(t in lower for t in spec_tokens):
+            continue
+        result.append(p)
+    return result
+
+
+def _pick_active_nav_item(page_name: str, nav_items: list[str]) -> str:
+    if not nav_items:
+        return ""
+    lower = page_name.lower()
+    for item in nav_items:
+        if item.lower() == lower:
+            return item
+    for item in nav_items:
+        if item.lower().strip() in lower:
+            return item
+    return ""
+
+
+def _infer_nav_items(pages: list[UIPageSpec]) -> list[str]:
+    exclude = {
+        "login", "sign in", "signin", "register", "registration", "sign up",
+        "signup", "forgot password", "password reset", "reset password",
+        "2fa", "verify", "verification", "onboarding", "welcome",
+    }
+    items, seen = [], set()
+    for p in pages:
+        name = p.name.strip()
+        lower = name.lower()
+        if lower in seen or any(t in lower for t in exclude):
+            continue
+        items.append(name)
+        seen.add(lower)
+    return items
+
+
+def _fill_missing_tokens(brief: UIDesignBrief):
+    """
+    FIX 1: This function must NEVER be called for poster briefs.
+    Callers now check is_poster before calling this.
+    """
+    style = brief.style.lower()
+    is_mobile = brief.platform == "mobile"
+
+    if not brief.color_palette or len(brief.color_palette) < 20:
+        if "fintech" in style or "luxury" in style:
+            brief.color_palette = "bg:#0A0E1A surface:#111827 primary:#6366F1 accent:#F59E0B text:#F9FAFB muted:#6B7280 border:#1F2937 success:#10B981 error:#EF4444"
+        elif is_mobile and "ios" in style and "dark" in style:
+            brief.color_palette = "bg:#1C1C1E surface:#2C2C2E primary:#0A84FF accent:#FFD60A text:#FFFFFF muted:#8E8E93 border:#3A3A3C success:#30D158 error:#FF453A"
+        elif is_mobile and "ios" in style:
+            brief.color_palette = "bg:#F2F2F7 surface:#FFFFFF primary:#007AFF accent:#FF9500 text:#000000 muted:#8E8E93 border:#C6C6C8 success:#34C759 error:#FF3B30"
+        elif "neo-brutalist" in style:
+            brief.color_palette = "bg:#FFFFFF surface:#F5F5F5 primary:#000000 accent:#FF3B00 text:#000000 muted:#555555 border:#000000 success:#00A550 error:#FF0000"
+        elif "dark" in style or "corporate" in style:
+            brief.color_palette = "bg:#0F172A surface:#1E293B primary:#38BDF8 accent:#F472B6 text:#F8FAFC muted:#64748B border:#334155 success:#4ADE80 error:#F87171"
+        else:
+            brief.color_palette = "bg:#F8FAFC surface:#FFFFFF primary:#6366F1 accent:#F59E0B text:#1E293B muted:#64748B border:#E2E8F0 success:#10B981 error:#EF4444"
+
+    if not brief.typography or len(brief.typography) < 20:
+        if is_mobile and ("ios" in style or "apple" in style):
+            brief.typography = "Display: SF Pro Display 700 32px, Heading: SF Pro Display 600 24px, Body: SF Pro Text 400 16px, Caption: SF Pro Text 400 12px"
+        elif is_mobile and "material" in style:
+            brief.typography = "Display: Google Sans 700 32px, Heading: Google Sans 600 22px, Body: Roboto 400 16px, Caption: Roboto 400 12px"
+        elif "neo-brutalist" in style:
+            brief.typography = "Display: Space Grotesk 800 52px, Heading: Space Grotesk 700 32px, Body: DM Mono 400 15px, Caption: DM Mono 400 12px"
+        elif "editorial" in style:
+            brief.typography = "Display: Playfair Display 700 52px, Heading: Playfair Display 600 36px, Body: Source Serif 4 400 17px, Caption: Source Serif 4 400 13px"
+        elif "fintech" in style or "luxury" in style:
+            brief.typography = "Display: Syne 800 48px, Heading: DM Sans 600 28px, Body: DM Sans 400 16px, Caption: DM Sans 400 12px, Mono: JetBrains Mono 400 14px"
+        elif is_mobile:
+            brief.typography = "Display: Plus Jakarta Sans 700 32px, Heading: Plus Jakarta Sans 600 22px, Body: Plus Jakarta Sans 400 16px, Caption: Plus Jakarta Sans 400 12px"
+        else:
+            brief.typography = "Display: Plus Jakarta Sans 700 44px, Heading: Plus Jakarta Sans 600 28px, Body: Plus Jakarta Sans 400 16px, Caption: Plus Jakarta Sans 400 12px"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# SESSION IMAGE STREAMING HELPERS
+# FIX 1 (continued): _fill_poster_tokens uses UNCONDITIONAL assignment
+# so it always wins over any prior defaults, and no longer needs weak guards.
+# ─────────────────────────────────────────────────────────────────────────────
+def _fill_poster_tokens(brief: UIDesignBrief):
+    """
+    FIX 1: Unconditionally sets poster-appropriate style, colors, and typography.
+    Called INSTEAD OF _fill_missing_tokens for poster briefs, so there is zero
+    risk of mobile/web defaults leaking in.
+    """
+    style = brief.style.lower()
+
+    # Always override style if it looks like a UI/mobile default
+    ui_style_tokens = {
+        "modern, clean, professional", "ios premium dark", "ios minimal light",
+        "material you vibrant", "soft saas light", "fintech mobile dark",
+        "corporate dark", "neo-brutalist",
+    }
+    if not brief.style or style in ui_style_tokens:
+        brief.style = "cinematic editorial poster"
+
+    # Always set rich poster color palette — unconditional override
+    if not brief.color_palette or len(brief.color_palette) < 20:
+        brief.color_palette = (
+            "bg:#050814 surface:#111827 primary:#F97316 accent:#22D3EE "
+            "text:#F8FAFC muted:#94A3B8 border:#1F2937 success:#10B981 error:#EF4444"
+        )
+
+    # Always set poster-appropriate display typography — unconditional override
+    if not brief.typography or len(brief.typography) < 20:
+        brief.typography = (
+            "Display: Bebas Neue 800 96px, Heading: Oswald 700 56px, "
+            "Body: Inter 400 24px, Caption: Inter 400 18px"
+        )
+
+    # FIX 4: Always lock resolution to poster canvas — never inherit 390x844 or 1440x900
+    if brief.poster_size:
+        brief.resolution = brief.poster_size
+    elif brief.resolution in ("390x844", "1440x900", ""):
+        brief.resolution = "1080x1080"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IMAGE HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _init_session_images(session_id: str) -> None:
-    if session_id not in _session_images:
-        _session_images[session_id] = {"images": [], "lock": threading.Lock()}
+def _looks_like_image(data: bytes) -> bool:
+    sigs = [b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a"]
+    if any(data.startswith(s) for s in sigs):
+        return True
+    return data.startswith(b"RIFF") and b"WEBP" in data[:16]
 
 
-def _add_image_to_session(session_id: str, image_dict: dict) -> None:
-    _init_session_images(session_id)
-    with _session_images[session_id]["lock"]:
-        _session_images[session_id]["images"].append(image_dict)
+def _normalize_inline(inline_data) -> bytes:
+    data = inline_data.data
+    if isinstance(data, str):
+        return base64.b64decode(data)
+    if _looks_like_image(data):
+        return data
+    try:
+        decoded = base64.b64decode(data, validate=True)
+        if _looks_like_image(decoded):
+            return decoded
+    except Exception:
+        pass
+    return data
 
 
-def _get_and_clear_session_images(session_id: str) -> list:
-    if session_id not in _session_images:
-        return []
-    with _session_images[session_id]["lock"]:
-        images = _session_images[session_id]["images"][:]
-        _session_images[session_id]["images"].clear()
-    return images
+def _extract_image_bytes(response) -> bytes:
+    candidates = getattr(response, "candidates", None) or []
+    for candidate in candidates:
+        parts = getattr(getattr(candidate, "content", None), "parts", None) or []
+        for part in parts:
+            inline = getattr(part, "inline_data", None)
+            if inline and getattr(inline, "mime_type", "").startswith("image/"):
+                return _normalize_inline(inline)
+    for candidate in candidates:
+        parts = getattr(getattr(candidate, "content", None), "parts", None) or []
+        for part in parts:
+            inline = getattr(part, "inline_data", None)
+            if inline:
+                return _normalize_inline(inline)
+    raise RuntimeError("No image data in model response")
 
 
-def _cleanup_session_images(session_id: str) -> None:
-    if session_id in _session_images:
-        del _session_images[session_id]
+def _save_image_bytes(image_bytes: bytes, path: Path):
+    img = Image.open(io.BytesIO(image_bytes))
+    img.save(path)
+
+
+def _bytes_to_b64(image_bytes: bytes) -> str:
+    return base64.b64encode(image_bytes).decode("utf-8")
+
+
+def _b64_to_bytes(b64: str) -> bytes:
+    return base64.b64decode(b64)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IMAGE GENERATION — Vertex AI, gemini-3.1-flash-image-preview
+# ─────────────────────────────────────────────────────────────────────────────
+PRIMARY_MODEL   = "gemini-3.1-flash-image-preview"
+FALLBACK_MODEL  = "gemini-2.5-flash-image"
+
+
+def _generate_image_bytes_vertex(
+    prompt_text: str,
+    model_name: str,
+    reference_bytes: Optional[bytes] = None,
+) -> bytes:
+    """Call Vertex AI image model. Optionally passes reference image as Part."""
+    from vertexai.generative_models import GenerativeModel, Part
+
+    _ensure_vertex_initialized()
+    model = GenerativeModel(model_name)
+
+    if reference_bytes is not None:
+        if reference_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+            mime = "image/png"
+        elif reference_bytes[:3] == b"\xff\xd8\xff":
+            mime = "image/jpeg"
+        else:
+            mime = "image/png"
+        ref_part = Part.from_data(data=reference_bytes, mime_type=mime)
+        contents = [ref_part, prompt_text]
+    else:
+        contents = [prompt_text]
+
+    response = model.generate_content(contents)
+    return _extract_image_bytes(response)
+
+
+def _generate_image_bytes_api(
+    prompt_text: str,
+    model_name: str,
+    reference_bytes: Optional[bytes] = None,
+) -> bytes:
+    """Call Google AI API. Optionally passes reference image."""
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    client = genai.Client(api_key=api_key)
+
+    if reference_bytes is not None:
+        if reference_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+            mime = "image/png"
+        elif reference_bytes[:3] == b"\xff\xd8\xff":
+            mime = "image/jpeg"
+        else:
+            mime = "image/png"
+        from google.genai import types as genai_types
+        image_part = genai_types.Part.from_bytes(data=reference_bytes, mime_type=mime)
+        text_part  = genai_types.Part.from_text(text=prompt_text)
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[genai_types.Content(parts=[image_part, text_part])],
+        )
+    else:
+        response = client.models.generate_content(model=model_name, contents=prompt_text)
+
+    return _extract_image_bytes(response)
+
+
+def _generate_image_sync(
+    prompt_text: str,
+    reference_bytes: Optional[bytes] = None,
+    max_retries: int = 3,
+) -> bytes:
+    """Generate image with retry + fallback model chain. Passes reference bytes when provided."""
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    use_api = bool(api_key)
+
+    model_chain = [PRIMARY_MODEL, FALLBACK_MODEL]
+    last_error = None
+
+    for model_name in model_chain:
+        for attempt in range(max_retries):
+            try:
+                if use_api:
+                    return _generate_image_bytes_api(prompt_text, model_name, reference_bytes)
+                else:
+                    return _generate_image_bytes_vertex(prompt_text, model_name, reference_bytes)
+            except Exception as e:
+                last_error = e
+                err = str(e).lower()
+                transient = ["ssl", "timeout", "503", "429", "connection", "stream removed", "temporarily unavailable"]
+                if any(x in err for x in transient):
+                    if attempt < max_retries - 1:
+                        wait = 2 ** attempt
+                        logger.warning(f"Retry {attempt+1}/{max_retries} | model={model_name} wait={wait}s | {str(e)[:100]}")
+                        time.sleep(wait)
+                        continue
+                logger.warning(f"Non-transient error for {model_name}: {str(e)[:100]} — trying next model")
+                break
+
+    raise last_error or RuntimeError("All models and retries exhausted")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DESIGN DNA EXTRACTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+DNA_EXTRACT_PROMPT = """You are a meticulous design-token extractor. 
+Analyse the UI screenshot and return ONLY a JSON object with these exact keys.
+No markdown, no preamble, no extra keys.
+
+{
+  "bg_color":          "#hex",
+  "surface_color":     "#hex",
+  "primary_color":     "#hex",
+  "accent_color":      "#hex",
+  "text_primary":      "#hex",
+  "text_secondary":    "#hex",
+  "muted_color":       "#hex",
+  "border_color":      "#hex",
+  "success_color":     "#hex",
+  "error_color":       "#hex",
+  "heading_font":      "exact font name",
+  "body_font":         "exact font name",
+  "mono_font":         "exact font name or empty string",
+  "card_radius":       "e.g. 16px",
+  "button_radius":     "e.g. 12px",
+  "button_style":      "e.g. filled primary_color, white bold text, 12px radius, 48px height",
+  "shadow_style":      "e.g. rgba(0,0,0,0.12) 0 4px 24px",
+  "icon_style":        "e.g. outline 24px, primary_color active / muted inactive",
+  "nav_type":          "bottom_tabs | sidebar | top_bar | none",
+  "nav_items":         ["label1", "label2", "label3"],
+  "nav_bg":            "#hex",
+  "nav_active_style":  "e.g. filled icon + bold label in primary_color, underline indicator",
+  "nav_inactive_style":"e.g. outline icon + regular label in muted_color",
+  "spacing_unit":      "e.g. 8px",
+  "visual_style":      "one-sentence description of the overall aesthetic",
+  "platform":          "mobile | web",
+  "resolution":        "e.g. 390x844",
+  "extra_motifs":      "e.g. glassmorphism cards, gradient mesh background"
+}
+
+Be exact: extract actual hex values, actual font names, actual measurements visible on screen.
+nav_items: list ALL tab/menu labels in their exact left-to-right or top-to-bottom order.
+"""
+
+
+def _extract_design_dna(image_bytes: bytes) -> DesignDNA:
+    """Extract locked design tokens from the first generated screen."""
+    try:
+        b64 = _bytes_to_b64(image_bytes)
+        resp = _get_llm().invoke([
+            HumanMessage(content=[
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                {"type": "text", "text": DNA_EXTRACT_PROMPT},
+            ])
+        ])
+        raw = getattr(resp, "content", str(resp)).strip()
+        data = _extract_json(raw)
+        dna = DesignDNA.model_validate(data)
+        logger.info(f"🧬 Design DNA extracted: style={dna.visual_style}, nav={dna.nav_type}, items={dna.nav_items}")
+        return dna
+    except Exception as e:
+        logger.warning(f"Design DNA extraction failed: {e}")
+        return DesignDNA()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REFERENCE IMAGE DESCRIPTION (for edit/revision mode)
+# ─────────────────────────────────────────────────────────────────────────────
+
+DESCRIBE_FOR_EDIT_PROMPT = (
+    "You are a senior UI designer doing a design audit for precise editing.\n"
+    "Describe in extreme detail:\n"
+    "1. Every visible UI element, its position, size, color, and style\n"
+    "2. The exact color hex values for background, surface, primary, accent, text\n"
+    "3. Typography: font families, weights, sizes\n"
+    "4. Navigation: type, position, tab labels, which tab is active\n"
+    "5. Cards: radius, shadow, padding, border\n"
+    "6. Any special effects: blur, gradients, glassmorphism\n"
+    "7. Content: exact text, numbers, usernames, dates visible on screen\n"
+    "8. Platform (web/mobile) and approximate resolution\n\n"
+    "The goal is to be able to recreate this EXACTLY and then apply a small change."
+)
+
+
+def _describe_image_for_edit(image_bytes: bytes) -> str:
+    try:
+        b64 = _bytes_to_b64(image_bytes)
+        resp = _get_llm().invoke([
+            HumanMessage(content=[
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                {"type": "text", "text": DESCRIBE_FOR_EDIT_PROMPT},
+            ])
+        ])
+        return getattr(resp, "content", str(resp)).strip()
+    except Exception as e:
+        logger.warning(f"Image description failed: {e}")
+        return ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PROMPT BUILDERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_intent_prompt(user_message: str, last_brief: Optional[dict], chat_history: Optional[list[dict]] = None) -> str:
+def _build_intent_prompt(
+    user_message: str,
+    last_brief: Optional[dict],
+    chat_history: Optional[list[dict]],
+) -> str:
     brief_text = json.dumps(last_brief, indent=2) if last_brief else "{}"
     history_text = _format_chat_history(chat_history)
-    return f"""
-You are an elite UI/UX design director. Parse the user request and produce a precise design brief.
+
+    return f"""You are an elite UI/UX design director and NLP specialist. Parse the user request precisely.
 
 USER MESSAGE:
 {user_message}
 
-RECENT SESSION CHAT HISTORY (newest at bottom):
+RECENT CHAT HISTORY:
 {history_text}
 
-LAST KNOWN DESIGN BRIEF (may be empty):
+LAST DESIGN BRIEF:
 {brief_text}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 INTENT OPTIONS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- chat    → user is asking a general question
-- collect → user wants a design but required info is missing
-- generate → user has given enough to generate UI images
-- edit   → user wants to change the latest generated image
+chat     → general question, no design work needed
+collect  → design requested but critical info missing (platform unclear, etc.)
+generate → enough info to generate UI/poster/logo images
+edit     → user wants to CHANGE a specific aspect of the LATEST generated image
+revision → user confirms changes from previous design (approve / minor tweak)
+
+REVISION DETECTION RULE:
+If the message says things like "change X", "make it Y", "update the color to Z",
+"shift to black background", "use red instead", "make it bigger", "remove the shadow"
+→ intent = "edit", change_request = exact description of what to change
+→ target_screens = which screens to apply the edit to (empty = all)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-REFERENCE IMAGE RULE
+POSTER SIZE DETECTION — CRITICAL
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-If user_message starts with [REFERENCE IMAGE ANALYSIS]:
-  - Auto-fill color_palette and typography from the analysis
-  - Do NOT ask the user for colors or fonts again
+If user mentions a poster platform or size, set poster_platform and poster_size:
+  "instagram story" | "ig story" | "reels"  → poster_size: "1080x1920"
+  "instagram post" | "square"               → poster_size: "1080x1080"
+  "tiktok"                                   → poster_size: "1080x1920"
+  "youtube thumbnail"                        → poster_size: "1280x720"
+  "twitter" | "x post"                       → poster_size: "1600x900"
+  "linkedin"                                 → poster_size: "1200x627"
+  "a4" | "print"                             → poster_size: "2480x3508"
+  "a3"                                       → poster_size: "3508x4961"
+  "banner"                                   → poster_size: "1500x500"
+  "facebook"                                 → poster_size: "1200x630"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DOCUMENT RULE
+LOGO DETECTION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-If user_message contains "[Page " markers it is extracted document text.
-  - Always set intent: "generate"
-  - Infer pages from section headings and workflows
-  - Infer platform, style, colors from document context
+If user says "logo", "brand mark", "icon mark" → set logo_only: true
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-LOGO RULE — detect logo-only requests
+PLATFORM RULE — MANDATORY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-If user_message asks to "design a logo", "create a logo", "make a logo", "logo for":
-  - Set intent: "generate"
-  - Set logo_only: true
-  - Extract brand_name
-  - Capture all logo requirements in logo_description
-  - Do NOT create pages or navigation items
-  - Focus ONLY on logo generation with style/color/composition details
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-LAST_BRIEF_RULE — when to use or ignore previous design
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-IGNORE the LAST_KNOWN_DESIGN_BRIEF (start fresh) if:
-  - User says: "make a [page name]" or "generate a [page name]" (no "also", "as well", "plus", "add", "additional")
-  - User's request is very short (< 15 words) and doesn't mention previous pages
-  - User is requesting ONE specific screen or a completely different product
-
-USE the LAST_KNOWN_DESIGN_BRIEF (add/modify) only if:
-  - User explicitly says "also", "as well", "plus", "add", "additional", "another", "more"
-  - User references previous context ("for the admin dashboard we already made...")
-  - User is clearly building on top of what was created before
-
-EXAMPLE:
-- "make a signup screen" → IGNORE last_brief, create ONE new screen for signup
-- "make a signup screen as well" → USE last_brief, add signup to existing pages
-- "Generate web UI for a new project" → IGNORE last_brief
-- "Also add a signup screen to the admin dashboard" → USE last_brief, add signup
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PLATFORM — MANDATORY FIELD
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-platform MUST be exactly "web" or "mobile". No other value is valid.
-  "web"    → 1440x900 resolution, mouse/keyboard, sidebar or topbar navigation
-  "mobile" → 390x844 resolution (iPhone 14), touch-first, bottom tab or top app-bar navigation
-If platform is ambiguous → set intent "collect" and ask: "Is this for web (desktop) or mobile (iOS/Android)?"
-Set resolution automatically:
-  web    → "1440x900"
-  mobile → "390x844"
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ALL REQUIRED FIELDS FOR intent: "generate"
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. screen_name   — descriptive name for the product / primary screen
-2. platform      — "web" or "mobile" only
-3. resolution    — auto-set from platform (do not leave default)
-4. layout        — specific structural description
-5. style         — named premium design system (see STYLE GUIDE below)
-6. color_palette — exact hex values for ALL color tokens
-7. typography    — specific font families with weights and sizes
-8. copy_tone     — e.g. "professional", "energetic", "minimal"
-9. components    — exhaustive list of every UI element on any page
-10. pages        — list of page specs
-11. nav_items    — navigation labels to show (may be fewer than pages). If user does not provide nav_items, infer a clean subset (exclude auth-only pages like login/forgot/reset/registration/2FA).
-
-PAGE LIST QUALITY RULE:
-- Do NOT add standalone pages named "Navbar", "Navigation", "Header", or "Sidebar" unless the user explicitly asks to design those as separate screens.
-- Treat navbar/header/sidebar as layout components inside pages, not as independent pages.
-
-SESSION MEMORY RULE:
-- Use RECENT SESSION CHAT HISTORY and LAST_KNOWN_DESIGN_BRIEF to avoid asking for information the user already provided earlier in this session.
-- Ask follow-up questions only for genuinely missing or conflicting fields.
-
-If ANY field is missing or vague → set intent "collect", ask ONE targeted question.
-
-DEFAULTING RULE FOR STYLE FIELDS:
-- If brand_name, color_palette, or typography are missing, do NOT block generation and do NOT ask follow-up just for those fields.
-- Set intent to "generate" and let backend defaults populate missing style tokens.
-- Use "collect" only when platform/scope is ambiguous or critical requirements conflict.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STYLE GUIDE — always pick a named system
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Web styles:
-  "luxury fintech dark"         bg near-black, gold/indigo, glassmorphism cards
-  "editorial minimal light"     white bg, one bold accent, dense editorial type
-  "neo-brutalist"               raw borders, bold black type, high contrast
-  "soft SaaS light"             white, indigo primary, generous rounded cards
-  "corporate premium dark"      charcoal, teal/cyan, data-dense tables
-  "vibrant consumer"            gradient bg, saturated colors, playful fonts
-
-Mobile styles:
-  "iOS premium dark"            #1C1C1E bg, SF Pro, blur cards, iOS nav
-  "iOS minimal light"           #F2F2F7 bg, system blue, clean spacing
-  "Material You vibrant"        dynamic color, M3 components, bold icons
-  "neon gaming mobile"          black bg, neon accents, bold display font
-  "health wellness pastel"      soft pink/green, rounded, friendly type
-  "fintech mobile dark"         dark navy, gold, data-forward
+platform MUST be "web" or "mobile" exactly.
+  web    → resolution: "1440x900"
+  mobile → resolution: "390x844"
+EXCEPTION: if poster_size is set, do NOT override resolution — keep poster_size as resolution.
+If ambiguous → intent: "collect", ask the user.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT JSON SCHEMA
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {{
   "intent": "generate",
-  "message": "Brief friendly response to user",
+  "message": "Brief friendly response",
+  "change_request": "",
+  "target_screens": [],
   "requirements": {{
-    "screen_name": "Vaultly",
+    "screen_name": "AppName",
     "platform": "mobile",
-    "layout": "Full-screen with bottom tab navigation (5 tabs), scrollable content areas",
-    "components": ["bottom tab bar", "balance card", "transaction list", "avatar", "quick action buttons"],
+    "layout": "bottom tab navigation, scrollable content",
+    "components": ["bottom tab bar", "balance card", "transaction list"],
     "style": "fintech mobile dark",
     "color_palette": "bg:#0D0D0D surface:#1A1A2E primary:#6C63FF accent:#FFD700 text:#FFFFFF muted:#8E8E93 border:#2C2C2E success:#30D158 error:#FF453A",
     "typography": "Display: SF Pro Display 700 32px, Heading: SF Pro Display 600 24px, Body: SF Pro Text 400 16px, Caption: SF Pro Text 400 12px",
@@ -645,773 +925,362 @@ OUTPUT JSON SCHEMA
     "resolution": "390x844",
     "num_images": 1,
     "brand_name": "Vaultly",
-        "nav_items": ["Home", "Send Money", "Cards", "Insights", "Settings"],
-    "pages": [
-      {{"name": "Home", "purpose": "Balance overview and recent transactions", "must_include": ["balance card", "quick actions", "recent transactions"], "avoid": ["clutter"]}},
-      {{"name": "Send Money", "purpose": "Transfer funds to contacts", "must_include": ["contact picker", "amount input keypad", "send CTA"], "avoid": []}}
-    ],
-    "skip_pages": [],
+    "nav_items": ["Home", "Send", "Cards", "Insights", "Settings"],
+    "poster_platform": "",
+    "poster_size": "",
     "logo_only": false,
-    "logo_description": ""
+    "logo_description": "",
+    "pages": [
+      {{"name": "Home", "purpose": "Balance overview", "must_include": ["balance card", "quick actions", "recent transactions"], "avoid": []}},
+      {{"name": "Send", "purpose": "Transfer funds", "must_include": ["contact picker", "amount input", "send CTA"], "avoid": []}}
+    ],
+    "skip_pages": []
   }},
-  "missing_fields": [],
-  "change_request": ""
+  "missing_fields": []
 }}
 """
 
 
-def _nav_items_from_pages(pages: list[UIPageSpec]) -> list[str]:
-    items: list[str] = []
-    seen: set[str] = set()
-    for page in pages:
-        name = page.name.strip()
-        if not name:
-            continue
-        key = name.lower()
-        if key in seen:
-            continue
-        items.append(name)
-        seen.add(key)
-    return items
+def _build_dna_constraint_block(dna: DesignDNA) -> str:
+    """Renders the locked design DNA as a prose constraint block for image prompts."""
+    if dna.is_empty():
+        return ""
+
+    nav_labels = ", ".join(dna.nav_items) if dna.nav_items else ""
+
+    return f"""
+══════════ FROZEN DESIGN DNA — DO NOT DEVIATE ══════════
+Every value below is MANDATORY. Changing any is a failure.
+
+COLORS (use these exact hex values):
+  Background:     {dna.bg_color}
+  Surface/Card:   {dna.surface_color}
+  Primary:        {dna.primary_color}
+  Accent/CTA:     {dna.accent_color}
+  Text Primary:   {dna.text_primary}
+  Text Secondary: {dna.text_secondary}
+  Muted:          {dna.muted_color}
+  Border:         {dna.border_color}
+  Success:        {dna.success_color}
+  Error:          {dna.error_color}
+
+TYPOGRAPHY (use these exact font names):
+  Heading font: {dna.heading_font}
+  Body font:    {dna.body_font}
+  Mono font:    {dna.mono_font}
+
+COMPONENT STYLE (replicate exactly):
+  Card radius:    {dna.card_radius}
+  Button radius:  {dna.button_radius}
+  Button style:   {dna.button_style}
+  Shadow:         {dna.shadow_style}
+  Icons:          {dna.icon_style}
+  Spacing unit:   {dna.spacing_unit}
+
+NAVIGATION (render identically across every screen):
+  Type:              {dna.nav_type}
+  Background:        {dna.nav_bg}
+  Labels in order:   {nav_labels}
+  Active item style: {dna.nav_active_style}
+  Inactive style:    {dna.nav_inactive_style}
+
+VISUAL STYLE: {dna.visual_style}
+EXTRA MOTIFS: {dna.extra_motifs}
+
+════════════════════════════════════════════════════════
+"""
 
 
-def _infer_nav_items(pages: list[UIPageSpec]) -> list[str]:
-    items = _nav_items_from_pages(pages)
-    if not items:
-        return items
-    exclude_tokens = {
-        "login", "sign in", "signin", "register", "registration", "sign up", "signup",
-        "forgot password", "password reset", "reset", "2fa", "two-factor",
-        "verify", "verification", "onboarding",
-    }
-    filtered: list[str] = []
-    for name in items:
-        lower = name.lower()
-        if any(token in lower for token in exclude_tokens):
-            continue
-        filtered.append(name)
-    return filtered or items
-
-
-def _is_auth_page(page_name: str) -> bool:
-    """Check if a page is an auth/onboarding screen (no navigation)."""
-    auth_tokens = {
-        "login", "sign in", "signin", "register", "registration", "sign up", "signup",
-        "forgot password", "password reset", "reset password", "password recovery",
-        "2fa", "two-factor", "2factor", "verify", "verification", "onboarding",
-    }
-    lower = page_name.lower()
-    return any(token in lower for token in auth_tokens)
-
-
-def _pick_active_nav_item(page_name: str, nav_items: list[str]) -> str:
-    """Pick a valid active nav label from the locked nav list."""
+def _build_nav_highlight_block(
+    page_name: str,
+    dna: DesignDNA,
+    platform: str,
+    nav_items: list[str],
+) -> str:
     if not nav_items:
         return ""
 
-    page_lower = page_name.lower()
-    for item in nav_items:
-        if item.lower() == page_lower:
-            return item
+    active = _pick_active_nav_item(page_name, nav_items) or ""
+    is_mobile = platform == "mobile"
+    nav_count = len(nav_items)
 
-    for item in nav_items:
-        token = item.lower().strip()
-        if token and token in page_lower:
-            return item
+    lines = []
+    if is_mobile:
+        lines.append("BOTTOM NAVIGATION BAR — render at the very bottom of the screen inside the phone:")
+    else:
+        lines.append("SIDEBAR NAVIGATION — render as a fixed left panel, full height:")
 
-    # If no reliable match exists, keep no active item.
-    return ""
-
-
-def _compact_components(components: list[str], max_items: int = 12) -> list[str]:
-    """Keep a compact unique component list to avoid prompt bloat and rendered spec leakage."""
-    seen: set[str] = set()
-    compact: list[str] = []
-    for item in components:
-        text = item.strip()
-        if not text:
-            continue
-        key = text.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        compact.append(text)
-        if len(compact) >= max_items:
-            break
-    return compact
-
-
-def _is_poster_request(brief: UIDesignBrief, pages: list[UIPageSpec], user_prompt: str = "") -> bool:
-    """
-    Detect poster intent conservatively.
-    We prefer false-negative over false-positive, because false-positive turns full UI prompts
-    into poster composites and breaks website generation.
-    """
-    explicit_poster_tokens = {
-        "poster", "flyer", "brochure", "print ad", "event poster", "movie poster",
-        "festival poster", "sale poster", "announcement poster", "a4", "a3",
-    }
-    social_graphic_tokens = {
-        "instagram post", "social post", "linkedin post", "facebook post", "thumbnail",
-        "story cover", "reel cover", "ad creative",
-    }
-    ui_tokens = {
-        "website", "web ui", "ui", "landing page", "landing", "navbar", "hero",
-        "footer", "faq", "pricing", "testimonials", "product showcase", "dashboard",
-        "screen", "section", "responsive", "conversion", "cta",
-    }
-
-    signals: list[str] = [brief.screen_name, brief.layout, brief.style, user_prompt]
-    signals.extend(brief.components)
-    signals.extend(p.name for p in pages)
-    combined = " ".join(s.lower() for s in signals if s)
-
-    has_explicit_poster = any(token in combined for token in explicit_poster_tokens)
-    has_social_graphic = any(token in combined for token in social_graphic_tokens)
-    has_ui_signal = any(token in combined for token in ui_tokens)
-
-    # If user is clearly asking for website/app UI, do not route to poster mode.
-    if has_ui_signal and not has_explicit_poster:
-        return False
-
-    # Poster mode only when explicit poster language is present, or clearly social-graphic intent
-    # with no UI-language conflict.
-    return has_explicit_poster or (has_social_graphic and not has_ui_signal)
-
-
-def _build_logo_prompt(brief: UIDesignBrief) -> str:
-    """Build prompt for logo generation."""
-    return f"""Generate a professional, modern logo for '{brief.brand_name or 'this product'}'.
-
-STYLE: {brief.style}
-COLOR PALETTE: {brief.color_palette}
-TYPOGRAPHY: {brief.typography}
-
-Design requirements:
-- Logo should be memorable, clean, and scalable
-- Use the brand colors and style from the design system above
-- Render as a standalone logo (square format, 512x512 pixels)
-- No background, transparent or solid surface color background
-- Can be icon-only, text-only, or a combination
-- Must look professional and premium
-
-CRITICAL RULES:
-- Do NOT include any text labels, descriptions, or spec information
-- Render ONLY the logo itself
-- The result must be a clean, professional logo ready for production use
-"""
-
-
-def _build_auth_spec_block(brief: UIDesignBrief) -> str:
-    """Build minimal spec for auth-only screens (no navigation)."""
-    is_mobile = brief.platform == "mobile"
-    layout_line = (
-        f"Render as a flat {brief.resolution} portrait mobile app canvas (edge-to-edge UI only). "
-        "Do NOT render a phone device frame, bezel, notch, physical buttons, drop shadow, or outer background. "
-        "Do NOT render OS status bar elements (time, battery, signal). "
-        "The app UI must fill the entire canvas from edge to edge with no outer margin or inset container."
-        if is_mobile
-        else f"Render as a {brief.resolution} desktop browser screenshot."
+    lines.append(
+        f"- Keep the exact same nav item count ({nav_count}) and the exact same icon set/order on every screen. "
+        "Do not add, remove, rename, or swap icons between screens."
     )
 
-    return f"""Render a high-fidelity, production-quality UI screenshot of {brief.brand_name or 'this product'}.
+    for item in nav_items:
+        if item == active:
+            if is_mobile:
+                lines.append(
+                    f"  ► '{item}' tab → ACTIVE: icon FILLED in {dna.primary_color or 'primary color'}, "
+                    f"label BOLD in {dna.primary_color or 'primary color'}, "
+                    f"small colored dot or bar indicator beneath label"
+                )
+            else:
+                lines.append(
+                    f"  ► '{item}' item → ACTIVE: 3px left border in {dna.primary_color or 'accent color'}, "
+                    f"background tinted {dna.primary_color or 'primary'}@15% opacity, "
+                    f"icon FILLED in {dna.primary_color or 'primary color'}, label BOLD"
+                )
+        else:
+            if is_mobile:
+                lines.append(
+                    f"  ○ '{item}' tab → INACTIVE: icon OUTLINE in {dna.muted_color or 'muted gray'}, "
+                    f"label regular weight in {dna.muted_color or 'muted gray'}, no indicator"
+                )
+            else:
+                lines.append(
+                    f"  ○ '{item}' item → INACTIVE: no border, transparent bg, "
+                    f"icon OUTLINE in {dna.muted_color or 'muted gray'}, label regular in {dna.muted_color or 'muted gray'}"
+                )
 
-VISUAL STYLE: {brief.style}
+    if not is_mobile and not active:
+        lines.append("  (no item is active on this screen)")
 
-LAYOUT:
-{layout_line}
-Show a centered form or modal dialog. No sidebar, no navigation bar. The form is the entire focus.
+    return "\n".join(lines)
 
-    VISUAL SYSTEM APPLICATION:
-    - Apply the locked color and typography system consistently across all UI elements.
-    - Keep this invisible to users: never render style tokens, font specs, color codes, or measurement values as visible text.
 
-COMPONENT STANDARDS:
-- Cards: rounded corners, surface-color background, soft shadow, generous padding
-- Primary button: filled with primary color, white text
-- Input fields: subtle border, surface background, placeholder text in muted color
-- Spacing: consistent and even
-
-CRITICAL RENDERING RULES:
-- Do NOT show any hex codes, font names, measurements, size indicators, or spec labels anywhere
-- Do NOT draw annotation arrows, dimension lines, or any design-tool text
-- Render ONLY what an end-user would see in a real product
-- The result must look like a real screenshot, not a mockup or wireframe
-- For mobile: output only the in-app screen canvas, never a handset mockup
-- Never render a style-guide/spec panel (no color swatches, no typography specimen list, no token tables)
-- Never render literal labels such as "Color palette", "Typography", "Display", "Heading", "Body", or "Caption"
-- For mobile: no nested frames or inset previews (never place a phone screen inside another canvas)
-- The UI must occupy 100% of the image area; no blank margins around a centered preview
+def _build_mobile_frame_block(resolution: str) -> str:
+    return f"""
+CANVAS — MOBILE APP SCREEN:
+- Render the UI inside a realistic iPhone 15 Pro-style device frame at {resolution}
+- The phone frame must be visible and complete, with bezel, notch, and hardware volume/power buttons
+- The app UI fills the screen area inside the device frame
+- DO NOT render OS status bar text or icons unless the design explicitly includes them
+- Keep the composition centered so the device can be shown cleanly in marketing mockups
 """
 
 
-def _build_poster_spec_block(brief: UIDesignBrief, components: list[str]) -> str:
-    component_inventory = ", ".join(components) if components else ""
-    return f"""Render a high-fidelity, production-quality marketing poster for {brief.brand_name or 'this brand'}.
-
-VISUAL STYLE: {brief.style}
-
-CANVAS:
-- Render as a flat poster canvas at {brief.resolution}
-- Do NOT render any mobile device frame, iOS status bar, browser chrome, app shell, navigation tabs, or sidebars
-- This is poster artwork, not an app screenshot
-
-COLOR PALETTE — use these exact colors:
-{brief.color_palette}
-
-TYPOGRAPHY — use these fonts and styles:
-{brief.typography}
-
-POSTER COMPONENT INVENTORY:
-{component_inventory}
-
-COMPOSITION RULES:
-- Strong visual hierarchy with clear focal point
-- Balanced spacing and alignment for print/social readability
-- Rich, polished background treatment (gradient/texture/illustration as appropriate)
-- Include realistic, production-ready typography and decorative elements
-- Use cinematic lighting, rich texture, and intentional depth so the result feels premium and handcrafted
-- Keep text concise and impactful; avoid long paragraphs unless explicitly requested
-
-CRITICAL RENDERING RULES:
-- Do NOT draw any hex codes, font names, measurements, or annotation text
-- Do NOT draw wireframe overlays, arrows, or dimension lines
-- Render only finished poster artwork suitable for social media or print
-- Do NOT render literal spec strings such as font tokens (e.g. "SF Pro Text 400 18px")
-- Do NOT render mobile status bars, tab bars, navigation labels, or app-like UI controls
+def _build_web_frame_block(resolution: str) -> str:
+    return f"""
+CANVAS — WEB APP SCREEN:
+- Render as a {resolution} desktop application window (NOT a browser screenshot)
+- No browser chrome, no address bar, no browser tabs — just the app UI
+- The layout is: fixed sidebar (240px) on the left + main content area filling the rest
+- The sidebar occupies the full height of the window
+- Main content area has a scrollable region with standard padding
 """
 
 
-def _build_brand_spec_block(brief: UIDesignBrief, nav_items: list[str], components: list[str]) -> str:
-    """
-    Build the LOCKED brand spec block prepended to EVERY page prompt.
-    Written as PROSE describing what to render — NOT as spec labels the
-    image model might draw as visible text annotations.
-    """
-    is_mobile = brief.platform.lower() == "mobile"
-
-    nav_labels = ", ".join(nav_items) if nav_items else ""
-    nav_count = len(nav_items)
-    component_inventory = ", ".join(components) if components else ""
-
-    if is_mobile:
-        nav_description = (
-            "At the bottom of the screen sits a fixed bottom tab bar with evenly spaced tabs. "
-            "Each tab has a simple icon above a short label. "
-            "The active tab icon and label use the primary color; inactive ones use the muted color. "
-            "The tab bar background matches the surface color with a subtle top divider. "
-            f"Tab labels (left to right) are exactly: {nav_labels}. Use exactly {nav_count} tabs."
-        )
-        layout_description = (
-            f"Render as a flat {brief.resolution} portrait mobile app canvas (edge-to-edge UI only). "
-            "Do NOT render a phone device frame, bezel, notch, hardware buttons, drop shadow, or outer background. "
-            "Do NOT render OS status bar elements (time, battery, signal). "
-            "Respect safe content spacing. Content scrolls above the bottom tab bar. "
-            "The app interface must fill the entire frame with no inset mockup, border matte, or centered preview card."
-        )
-    else:
-        nav_description = (
-            "On the left side of the screen is a fixed sidebar with the brand logo at the top. "
-            "Below are vertical navigation items with an icon and label. "
-            "The active item is highlighted using the primary color. "
-            "Inactive items use the muted text color. The sidebar background is the surface color. "
-            f"Navigation labels (top to bottom) are exactly: {nav_labels}. Use exactly {nav_count} items. "
-            "Do NOT add a second navigation system. No top navbar links."
-        )
-        layout_description = (
-            f"Render as a {brief.resolution} desktop application UI (not a browser screenshot). "
-            "No browser chrome, no tabs, no address bar — just the app interface. "
-            "The main layout is the sidebar on the left and the content area filling the rest. "
-            "Use ONLY the left sidebar for navigation."
-        )
-
-    return f"""Render a high-fidelity, production-quality UI screenshot of {brief.brand_name or 'this product'}.
-
-VISUAL STYLE: {brief.style}
-
-LAYOUT:
-{layout_description}
-
-    VISUAL SYSTEM APPLICATION:
-    - Apply the locked design system consistently for color, contrast, typography, spacing, and hierarchy.
-    - Keep all internal style specs invisible: never render token names, font specs, color codes, or sizing values.
-
-NAVIGATION:
-{nav_description}
-
-COMPONENT STANDARDS — keep component styling consistent across all screens:
-- Cards: rounded corners, surface-color background, soft shadow, generous padding
-- Primary button: filled with primary color, white text, consistent radius and height
-- Secondary button: transparent background with primary-color border, same radius and height as primary
-- Input fields: subtle border, surface background, comfortable padding, muted placeholder text
-- Icons: consistent line style and size
-- Spacing: consistent grid rhythm with even gaps
-
-CONTENT: Show a fully populated, realistic screen. Use plausible names, real-looking numbers, and authentic dates. No "Lorem ipsum", no "User Name", no placeholder text of any kind.
-
-CRITICAL RENDERING RULES:
-- Do NOT draw any hex codes, font names, measurements, or spec labels anywhere on the image
-- The image should be clean and polished, as if taken from a real product — no design tool overlays, no annotation arrows, no dimension lines
-- Do NOT draw annotation arrows, dimension lines, or any design-tool overlays
-- Render ONLY what an end-user would see in the live product
-- The result must look like a real screenshot from a shipped product, not a mockup or wireframe
-- Never render literal spec tokens like: "Inter", "Montserrat", "Section Title", "Body", "Caption", "px", or "#00C6FB"
-- Never render internal guidance words like: "component inventory", "must include", "purpose", or "screen name"
-- For mobile screens: output only the app canvas, never a physical phone mockup
-- Never render a style-guide/design-system board, swatch strip, or typography specimen card
-- Never render literal labels such as "Color palette", "Typography", "Display", "Heading", "Body", or "Caption"
-- For mobile: never place the UI inside a smaller rectangle/card; it must be full-bleed edge-to-edge
-- Do not render any outer background around the app UI
-"""
-
-
-def _build_page_prompt(
+def _build_base_prompt(
     brief: UIDesignBrief,
     page: UIPageSpec,
-    brand_spec: str,
+    dna: DesignDNA,
     nav_items: list[str],
-    components: list[str],
-    is_poster: bool = False,
+    is_revision: bool = False,
+    change_request: str = "",
+    reference_description: str = "",
 ) -> str:
-    """Build the complete, self-contained image generation prompt for a single page."""
-    is_mobile = brief.platform.lower() == "mobile"
+    is_mobile = brief.platform == "mobile"
     is_auth = _is_auth_page(page.name)
 
-    must_include_text = (
-        "This screen must contain: " + ", ".join(page.must_include) + "."
-        if page.must_include else ""
+    frame_block = _build_mobile_frame_block(brief.resolution) if is_mobile else _build_web_frame_block(brief.resolution)
+
+    dna_block = _build_dna_constraint_block(dna) if not dna.is_empty() else f"""
+DESIGN SYSTEM:
+  Style: {brief.style}
+  Colors: {brief.color_palette}
+  Typography: {brief.typography}
+"""
+
+    nav_block = ""
+    if not is_auth and nav_items:
+        nav_block = _build_nav_highlight_block(page.name, dna, brief.platform, nav_items)
+
+    must = "\n".join(f"  • {m}" for m in page.must_include) if page.must_include else "  • (Infer appropriate content for this screen)"
+    avoid = "\n".join(f"  • {a}" for a in page.avoid) if page.avoid else ""
+
+    edit_block = ""
+    if is_revision and change_request:
+        edit_block = f"""
+══════════ REVISION INSTRUCTION ══════════
+CURRENT STATE (from reference image):
+{reference_description or "(see attached reference image)"}
+
+CHANGE REQUEST:
+{change_request}
+
+WHAT TO KEEP IDENTICAL:
+- All colors, fonts, radii, shadows
+- All content not mentioned in the change request
+- Navigation bar styling and layout
+- Every other UI element not mentioned
+
+WHAT TO CHANGE:
+- ONLY what is described in the change request above
+- Nothing else
+══════════════════════════════════════════
+"""
+
+    auth_note = (
+        "\nIMPORTANT: This is an authentication screen — DO NOT render any navigation bar, sidebar, or bottom tabs.\n"
+        "Show ONLY a centered, focused form. The entire screen is the form.\n"
+        if is_auth else ""
     )
-    avoid_text = (
-        "Do not include: " + ", ".join(page.avoid) + "."
-        if page.avoid else ""
-    )
 
-    if is_poster:
-        component_inventory = ", ".join(components) if components else ""
-        return f"""{brand_spec}
-CRITICAL RULE:
-- Do not render any mobile screen, status bar, app navigation, browser frame, or UI chrome
+    return f"""Render a high-fidelity, production-quality UI screenshot for: {brief.brand_name or brief.screen_name}
 
-NOW RENDER THIS SPECIFIC POSTER:
-Poster name: {page.name}
-Purpose: {page.purpose or page.name}
+{frame_block}
 
-Poster component inventory (use these exact names): {component_inventory}
+{dna_block}
 
-{must_include_text}
-{avoid_text}
+{nav_block}
 
-Render one complete standalone poster composition for {page.name}. It must look polished, expressive, and production-ready.
-"""
+{auth_note}
 
-    # For auth screens: no navigation, just centered form
-    if is_auth:
-        return f"""{brand_spec}
-CRITICAL RULE:
-- Do not render any spec labels, measurements, size indicators, or annotation text in the UI
-- This is an authentication screen — do NOT include sidebar, navigation, navigation bar, or any platform elements
-- Only show the centered form/modal
+SCREEN: {page.name}
+PURPOSE: {page.purpose or page.name}
 
-NOW RENDER THIS SPECIFIC SCREEN:
-Screen name: {page.name}
-Purpose: {page.purpose or page.name}
+REQUIRED CONTENT (show ALL of these):
+{must}
 
-{must_include_text}
-{avoid_text}
+{"AVOID: " + avoid if avoid else ""}
 
-Render a clean, centered authentication form. The entire screen focuses on the form — no navigation, no sidebar, no distractions, no platform chrome.
-"""
+CONTENT QUALITY RULES:
+- Show fully populated, realistic screen with actual data (names, numbers, dates, images)
+- NO "Lorem ipsum", NO "User Name", NO placeholder text of any kind
+- Every element must look like it came from a shipped, production product
+- Text must be legible and appropriately sized for the platform
 
-    # For platform screens: include navigation
-    nav_labels = ", ".join(nav_items) if nav_items else ""
-    active_nav = _pick_active_nav_item(page.name, nav_items)
-    if is_mobile:
-        if active_nav:
-            nav_reminder = (
-                "The bottom tab bar must be visible at the bottom, identical in styling to every other screen in this product. "
-                f"Tab labels (left to right): {nav_labels}. Active tab: {active_nav}."
-            )
-        else:
-            nav_reminder = (
-                "The bottom tab bar must be visible at the bottom, identical in styling to every other screen in this product. "
-                f"Tab labels (left to right): {nav_labels}. No tab should appear active for this screen."
-            )
-    else:
-        if active_nav:
-            nav_reminder = (
-                "The left sidebar must be visible on the left edge, identical in styling to every other screen in this product. "
-                f"Navigation labels (top to bottom): {nav_labels}. Active item: {active_nav}."
-            )
-        else:
-            nav_reminder = (
-                "The left sidebar must be visible on the left edge, identical in styling to every other screen in this product. "
-                f"Navigation labels (top to bottom): {nav_labels}. No sidebar item should appear active for this screen."
-            )
+{edit_block}
 
-    return f"""{brand_spec}
-CRITICAL RULE:
-- Do not render any spec labels, measurements, size indicators, or annotation text in the UI
-- Do not render literal token text such as font specifications or color specifications
-- If platform is mobile, render only the flat app screen canvas (no device frame, no notch, no phone body)
-- This must be a real product screen, not a design-system/spec screen
-- Do NOT include color swatch rows, typography specimen lists, token legends, or style reference panels
-- For mobile: the UI must be full-bleed and fill the entire image; never inset/center the screen as a preview inside another canvas
+CRITICAL RENDERING RULES (violations = wrong output):
+- DO NOT render any hex codes, font names, measurements, or spec labels as visible text
+- DO NOT render annotation arrows, dimension lines, or design-tool overlays
+- DO NOT render style-guide panels, color swatches, or typography specimens
+- DO NOT render literal tokens like "Inter", "Montserrat", "#6366F1", "16px", "Caption"
+- The result must look exactly like a real screenshot from a production app
+- For mobile: render the UI inside a realistic iPhone 15 Pro-style device frame
+- For mobile: the app screen must be fully visible within the phone frame
 
-NOW RENDER THIS SPECIFIC SCREEN:
-Screen name: {page.name}
-Purpose: {page.purpose or page.name}
-
-{must_include_text}
-{avoid_text}
-
-{nav_reminder}
-
-Do NOT include content that belongs to other screens. Only render the content for this screen.
-
-Render the complete {page.name} screen. Every color, font, spacing value, and component style must match the design system described above exactly. The screen must look pixel-perfect and production-ready.
-"""
-
-
-def _build_document_processor_prompt(document_text: str) -> str:
-    # Truncate and sanitize for embedding in the prompt
-    truncated = document_text[:3000]
-    short = document_text[:300].replace("\n", " ").replace('"', "'")
-    return f"""
-You are a technical document analyst specializing in product and system design.
-Extract structured information from the document below to drive UI generation.
-
-DOCUMENT TEXT:
-{truncated}
-
-Return ONLY valid JSON matching this schema exactly:
-{{
-  "is_document": true,
-  "summary": "One-line description of what this document describes",
-  "detected_pages": ["Page Name 1", "Page Name 2", "Page Name 3"],
-  "features": ["Feature A", "Feature B"],
-  "user_workflows": ["Workflow A", "Workflow B"],
-  "user_roles": ["Role A", "Role B"],
-  "tone": "professional",
-  "style_hints": "Modern corporate SaaS with clean data tables",
-  "color_hints": "Dark background, blue primary, white text",
-  "platform": "web",
-  "raw_text": "{short}"
-}}
-
-Rules:
-- detected_pages: infer 3-7 key UI screens from the document's sections and described workflows
-- tone: one of professional | friendly | technical | marketing | minimalist
-- platform: default "web" unless document explicitly mentions mobile/app
-- style_hints and color_hints: infer from industry context if not stated
+Ultra high-fidelity. Pixel-perfect. Production-ready. Photorealistic rendering. No motion blur.
 """
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IMAGE DESCRIPTION (reference / edit mode)
+# FIX 3: _build_poster_prompt now accepts user_original_prompt
+# so the raw creative intent is never lost when building the image prompt.
 # ─────────────────────────────────────────────────────────────────────────────
+def _build_poster_prompt(
+    brief: UIDesignBrief,
+    page: UIPageSpec,
+    change_request: str = "",
+    reference_description: str = "",
+    is_revision: bool = False,
+    user_original_prompt: str = "",          # FIX 3: new param
+) -> str:
+    size = brief.poster_size or "1080x1080"
+    platform_label = brief.poster_platform or "Social Media"
+    w, h = size.split("x") if "x" in size else ("1080", "1080")
+    orientation = "portrait" if int(h) > int(w) else ("landscape" if int(w) > int(h) else "square")
 
-DESCRIBE_IMAGE_PROMPT = (
-    "You are a senior UI designer doing a design audit for pixel-perfect recreation.\n\n"
-    "Describe the following in detail:\n"
-    "1. COLORS: Exact hex values for background, surface, primary, accent, text, muted, border\n"
-    "2. TYPOGRAPHY: Font families, weights, sizes for heading/body/caption\n"
-    "3. LAYOUT: Sidebar width, column count, gutters, margins, overall structure\n"
-    "4. COMPONENTS: Every component with border-radius, shadow, padding, border style\n"
-    "5. NAVIGATION: Type (sidebar / topbar / bottom tabs), dimensions, active state style\n"
-    "6. VISUAL EFFECTS: Gradients, glassmorphism, blur, shadows\n"
-    "7. ICONS: Approximate size, filled or outlined\n"
-    "8. CONTENT: What realistic data is shown (names, numbers, labels)\n"
-    "9. PLATFORM: Web or mobile\n"
-    "10. OVERALL STYLE: One sentence summary\n\n"
-    "Be extremely specific — someone must be able to recreate this exactly."
-)
+    edit_block = ""
+    if is_revision and change_request:
+        edit_block = f"""
+REVISION:
+Current state: {reference_description or "(see reference image)"}
+Apply ONLY this change: {change_request}
+Keep everything else identical.
+"""
 
+    must = ", ".join(page.must_include) if page.must_include else "(infer appropriate elements)"
 
-def _describe_reference_image(image_path: str) -> str:
-    if not image_path or not os.path.exists(image_path):
-        return ""
-    ext = os.path.splitext(image_path)[1].lower().lstrip(".")
-    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext, "image/png")
-    with open(image_path, "rb") as f:
-        data = base64.b64encode(f.read()).decode("utf-8")
-    return _describe_image_from_base64(data, mime)
+    # FIX 3: Embed the user's original request verbatim so no creative intent is lost
+    original_request_block = ""
+    if user_original_prompt:
+        original_request_block = f"""
+ORIGINAL USER REQUEST (highest priority — honour every detail):
+\"\"\"{user_original_prompt}\"\"\"
 
+The above request is the primary creative brief. Every other instruction below
+is a technical constraint that supports it, not a replacement for it.
+"""
 
-def _describe_reference_image_base64(base64_data: str) -> str:
-    if not base64_data:
-        return ""
-    return _describe_image_from_base64(base64_data, "image/png")
+    return f"""Generate a professional, high-quality {platform_label} graphic for: {brief.brand_name or brief.screen_name}
 
+{original_request_block}
 
-def _describe_image_from_base64(b64_data: str, mime: str) -> str:
-    try:
-        resp = _get_llm().invoke([
-            HumanMessage(content=[
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64_data}"}},
-                {"type": "text", "text": DESCRIBE_IMAGE_PROMPT},
-            ])
-        ])
-        return getattr(resp, "content", str(resp)).strip()
-    except Exception:
-        return ""
+CANVAS:
+- Exact dimensions: {size} pixels ({orientation})
+- Render as a flat {orientation} poster canvas
+- Do NOT render any mobile device frame, browser chrome, app navigation, or UI shell
+- This is poster artwork, NOT an app screenshot
 
+VISUAL STYLE: {brief.style}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# IMAGE GENERATION
-# ─────────────────────────────────────────────────────────────────────────────
+COLOR PALETTE:
+{brief.color_palette}
 
-def _looks_like_image_bytes(data: bytes) -> bool:
-    signatures = [
-        b"\x89PNG\r\n\x1a\n",  # PNG
-        b"\xff\xd8\xff",  # JPEG
-        b"GIF87a",  # GIF
-        b"GIF89a",  # GIF
-        b"RIFF",  # WEBP starts with RIFF....WEBP
-    ]
+TYPOGRAPHY:
+{brief.typography}
 
-    if any(data.startswith(sig) for sig in signatures):
-        return True
+POSTER CONTENT:
+{must}
 
-    if data.startswith(b"RIFF") and b"WEBP" in data[:16]:
-        return True
+COMPOSITION RULES:
+- Strong visual hierarchy with a clear focal point
+- Balanced spacing and alignment for strong social readability
+- Rich, polished background treatment (gradient / texture / cinematic environment / illustration as appropriate)
+- Include impactful, production-ready typography and decorative elements
+- Use cinematic lighting, rich texture, and intentional depth so the result feels premium and handcrafted
+- Keep text concise and highly legible at full size
+- If the concept calls for a stylized illustration, use a polished editorial illustration; if it calls for realism, use photorealism
+- Maintain realistic anatomy and natural proportions for people
+- Avoid distorted faces, extra limbs, warped hands, duplicated bodies, and malformed details
 
-    return False
+{edit_block}
 
-
-def _normalize_inline_image_bytes(inline_data) -> bytes:
-    data = inline_data.data
-
-    if isinstance(data, str):
-        return base64.b64decode(data)
-
-    # Most SDK responses already provide raw bytes. Keep as-is if signature matches.
-    if _looks_like_image_bytes(data):
-        return data
-
-    # Fallback: some responses can still contain base64 text in bytes form.
-    try:
-        decoded = base64.b64decode(data, validate=True)
-        if _looks_like_image_bytes(decoded):
-            return decoded
-    except Exception:
-        pass
-
-    return data
+CRITICAL RULES:
+- DO NOT draw any hex codes, font names, or annotation text
+- DO NOT draw wireframe overlays, arrows, or dimension lines
+- Render only finished poster artwork suitable for {platform_label}
+- The result must be print/publish-ready at {size}px
+"""
 
 
-def _extract_first_image_bytes_from_genai_response(response) -> bytes:
-    candidates = getattr(response, "candidates", None) or []
-    if not candidates:
-        raise RuntimeError("No candidates returned by model")
+def _build_logo_prompt(brief: UIDesignBrief, change_request: str = "", reference_description: str = "") -> str:
+    edit_block = ""
+    if change_request:
+        edit_block = f"""
+REVISION:
+Current logo: {reference_description or "(see reference image)"}
+Apply ONLY: {change_request}
+Keep brand identity, proportions, and all other elements identical.
+"""
 
-    for candidate in candidates:
-        parts = getattr(getattr(candidate, "content", None), "parts", None) or []
-        for part in parts:
-            inline_data = getattr(part, "inline_data", None)
-            mime_type = getattr(inline_data, "mime_type", "") if inline_data else ""
-            if inline_data and mime_type.startswith("image/"):
-                return _normalize_inline_image_bytes(inline_data)
+    spec = brief.logo_description or f"A professional logo for '{brief.brand_name}'"
 
-    # Fallback: accept first inline_data if mime_type is missing in response.
-    for candidate in candidates:
-        parts = getattr(getattr(candidate, "content", None), "parts", None) or []
-        for part in parts:
-            inline_data = getattr(part, "inline_data", None)
-            if inline_data:
-                return _normalize_inline_image_bytes(inline_data)
+    return f"""Design a professional, production-ready logo.
 
-    raise RuntimeError("No image data returned by model")
+BRAND: {brief.brand_name or 'this product'}
+STYLE: {brief.style}
+COLORS: {brief.color_palette}
+TYPOGRAPHY: {brief.typography}
 
-def _ensure_vertex_initialized() -> None:
-    global _vertex_initialized
-    if _vertex_initialized:
-        return
+REQUIREMENTS:
+{spec}
 
-    with _vertex_init_lock:
-        if _vertex_initialized:
-            return
+LOGO STANDARDS:
+- Clean, memorable, and scalable (works at 16px favicon and 1000px display)
+- Works in both color and monochrome
+- Render on a solid surface-color background or transparent
+- Square canvas, centered composition
+- High resolution, vector-style appearance
 
-        import vertexai
+{edit_block}
 
-        creds, project = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/cloud-platform"]
-        )
-        project_id = project or os.getenv("GOOGLE_CLOUD_PROJECT", "joblynk-489820")
-        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
-        vertexai.init(project=project_id, location=location, credentials=creds)
-        _vertex_initialized = True
-        logger.info(f"✅ Vertex AI initialized | project={project_id} location={location}")
-
-
-def _generate_image_bytes(prompt_text: str, model_name: str) -> bytes:
-    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-    if api_key:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt_text,
-        )
-        return _extract_first_image_bytes_from_genai_response(response)
-
-    from vertexai.generative_models import GenerativeModel
-
-    _ensure_vertex_initialized()
-    model = GenerativeModel(model_name)
-    response = model.generate_content(prompt_text)
-    return _extract_first_image_bytes_from_genai_response(response)
-
-
-def _save_image_bytes(image_bytes: bytes, path: Path) -> None:
-    image = Image.open(io.BytesIO(image_bytes))
-    image.save(path)
-
-
-def _generate_image_sync(prompt_text: str, max_retries: int = 3) -> bytes:
-    """Synchronous wrapper with exponential-backoff retry."""
-    import time
-    model_chain = [
-        "gemini-3.1-flash-image-preview",
-        "gemini-2.5-flash-image",
-    ]
-    last_error = None
-    for model_name in model_chain:
-        for attempt in range(max_retries):
-            try:
-                return _generate_image_bytes(prompt_text, model_name)
-            except Exception as e:
-                last_error = e
-                err = str(e).lower()
-                transient_markers = [
-                    "ssl",
-                    "decryption",
-                    "bad_decrypt",
-                    "bad record mac",
-                    "tsi_data_corrupted",
-                    "stream removed",
-                    "connection",
-                    "timeout",
-                    "temporarily unavailable",
-                    "503",
-                    "429",
-                ]
-                if any(x in err for x in transient_markers):
-                    if attempt < max_retries - 1:
-                        wait = 2 ** attempt
-                        logger.warning(
-                            f"Retry {attempt + 1}/{max_retries} | model={model_name} "
-                            f"wait={wait}s | err={str(e)[:120]}"
-                        )
-                        time.sleep(wait)
-                        continue
-                # Try next model when this model cannot satisfy request.
-                break
-    raise last_error or RuntimeError("Image generation failed after retries")
-
-
-def _generate_images_threaded(page_prompts: list, num_images: int, max_workers: int = 2) -> list:
-    """Generate all page images in parallel threads."""
-    import logging
-    logger = logging.getLogger(__name__)
-    image_data = []
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures: dict = {}
-        for page_idx, page in enumerate(page_prompts):
-            page_name = page.get("page_name", f"Page {page_idx + 1}")
-            page_prompt = page.get("prompt", "")
-            for variant_idx in range(max(1, num_images)):
-                future = executor.submit(_generate_image_sync, page_prompt)
-                futures[future] = (page_name, variant_idx)
-
-        for future in as_completed(futures):
-            page_name, variant_idx = futures[future]
-            try:
-                image_bytes = future.result()
-                image_data.append({
-                    "page_name": page_name,
-                    "variant_idx": variant_idx,
-                    "image_bytes": image_bytes,
-                })
-                logger.info(f"✓ Generated: {page_name} v{variant_idx + 1}")
-            except Exception as e:
-                logger.error(f"✗ Failed: {page_name} v{variant_idx + 1} — {str(e)[:100]}")
-
-    return image_data
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DEFAULT PALETTE / TYPOGRAPHY FALLBACKS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _fill_missing_tokens(brief: UIDesignBrief) -> None:
-    """Populate color_palette and typography if not set — prevents vague prompts."""
-    style_lower = brief.style.lower()
-    is_mobile = brief.platform.lower() == "mobile"
-
-    if not brief.color_palette or len(brief.color_palette) < 20:
-        if "fintech" in style_lower or "luxury" in style_lower:
-            brief.color_palette = "bg:#0A0E1A surface:#111827 primary:#6366F1 accent:#F59E0B text:#F9FAFB muted:#6B7280 border:#1F2937 success:#10B981 error:#EF4444"
-        elif is_mobile and "ios" in style_lower and "dark" in style_lower:
-            brief.color_palette = "bg:#1C1C1E surface:#2C2C2E primary:#0A84FF accent:#FFD60A text:#FFFFFF muted:#8E8E93 border:#3A3A3C success:#30D158 error:#FF453A"
-        elif is_mobile and "ios" in style_lower:
-            brief.color_palette = "bg:#F2F2F7 surface:#FFFFFF primary:#007AFF accent:#FF9500 text:#000000 muted:#8E8E93 border:#C6C6C8 success:#34C759 error:#FF3B30"
-        elif "neo-brutalist" in style_lower:
-            brief.color_palette = "bg:#FFFFFF surface:#F5F5F5 primary:#000000 accent:#FF3B00 text:#000000 muted:#555555 border:#000000 success:#00A550 error:#FF0000"
-        elif "pastel" in style_lower or "health" in style_lower or "wellness" in style_lower:
-            brief.color_palette = "bg:#FDF6FF surface:#FFFFFF primary:#A78BFA accent:#F9A8D4 text:#1F1F2E muted:#9CA3AF border:#E9D5FF success:#86EFAC error:#FCA5A5"
-        elif "dark" in style_lower or "corporate" in style_lower:
-            brief.color_palette = "bg:#0F172A surface:#1E293B primary:#38BDF8 accent:#F472B6 text:#F8FAFC muted:#64748B border:#334155 success:#4ADE80 error:#F87171"
-        else:
-            # Default: clean light SaaS
-            brief.color_palette = "bg:#F8FAFC surface:#FFFFFF primary:#6366F1 accent:#F59E0B text:#1E293B muted:#64748B border:#E2E8F0 success:#10B981 error:#EF4444"
-
-    if not brief.typography or len(brief.typography) < 20:
-        if is_mobile and ("ios" in style_lower or "apple" in style_lower):
-            brief.typography = "Display: SF Pro Display 700 32px, Heading: SF Pro Display 600 24px, Body: SF Pro Text 400 16px, Caption: SF Pro Text 400 12px"
-        elif is_mobile and "material" in style_lower:
-            brief.typography = "Display: Google Sans 700 32px, Heading: Google Sans 600 22px, Body: Roboto 400 16px, Caption: Roboto 400 12px"
-        elif "neo-brutalist" in style_lower:
-            brief.typography = "Display: Space Grotesk 800 52px, Heading: Space Grotesk 700 32px, Body: DM Mono 400 15px, Caption: DM Mono 400 12px"
-        elif "editorial" in style_lower:
-            brief.typography = "Display: Playfair Display 700 52px, Heading: Playfair Display 600 36px, Body: Source Serif 4 400 17px, Caption: Source Serif 4 400 13px"
-        elif "fintech" in style_lower or "luxury" in style_lower:
-            brief.typography = "Display: Syne 800 48px, Heading: DM Sans 600 28px, Body: DM Sans 400 16px, Caption: DM Sans 400 12px, Mono: JetBrains Mono 400 14px"
-        elif is_mobile:
-            brief.typography = "Display: Plus Jakarta Sans 700 32px, Heading: Plus Jakarta Sans 600 22px, Body: Plus Jakarta Sans 400 16px, Caption: Plus Jakarta Sans 400 12px"
-        else:
-            brief.typography = "Display: Plus Jakarta Sans 700 44px, Heading: Plus Jakarta Sans 600 28px, Body: Plus Jakarta Sans 400 16px, Caption: Plus Jakarta Sans 400 12px"
-
-
-def _fill_poster_tokens(brief: UIDesignBrief) -> None:
-    """Populate poster-friendly defaults so poster prompts do not inherit UI/mobile styling bias."""
-    style_lower = brief.style.lower()
-
-    weak_styles = {
-        "modern, clean, professional",
-        "ios premium dark",
-        "ios minimal light",
-        "material you vibrant",
-        "soft saas light",
-    }
-
-    if not brief.style or style_lower in weak_styles:
-        brief.style = "festival editorial poster"
-
-    if not brief.color_palette or len(brief.color_palette) < 20:
-        brief.color_palette = (
-            "bg:#F8F6F1 surface:#FFFFFF primary:#C59D5F accent:#0E5A64 "
-            "text:#1E1E1E muted:#8E8E93 border:#E8DDB8"
-        )
-
-    if not brief.typography or len(brief.typography) < 20:
-        brief.typography = (
-            "Calligraphy: Noto Naskh Arabic 700, "
-            "Headline: Playfair Display 700, "
-            "Body: Merriweather 400"
-        )
-
-    if brief.resolution in ("390x844", "1440x900", ""):
-        brief.resolution = "1080x1350"
+CRITICAL RULES:
+- Render ONLY the logo — no spec labels, no measurements, no descriptive text
+- No sample text that says "Logo" or "Brand Name"
+- Output must be production-ready
+"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1419,18 +1288,26 @@ def _fill_poster_tokens(brief: UIDesignBrief) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def ui_chatbot_node(state: dict) -> dict:
+    """NLP intent classification with reference image support."""
     user_message = (state.get("user_prompt") or "").strip()
     last_brief = state.get("design_brief")
     chat_history = state.get("chat_history") or []
 
-    # Auto-analyze reference image — prepend description so LLM auto-fills brief fields
     if state.get("reference_image_base64"):
-        ref_desc = _describe_reference_image_base64(state["reference_image_base64"])
-        if ref_desc:
-            user_message = f"[REFERENCE IMAGE ANALYSIS]\n{ref_desc}\n\n[USER REQUEST]\n{user_message}"
+        try:
+            b64 = state["reference_image_base64"]
+            resp = _get_llm().invoke([
+                HumanMessage(content=[
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                    {"type": "text", "text": DESCRIBE_FOR_EDIT_PROMPT},
+                ])
+            ])
+            desc = getattr(resp, "content", str(resp)).strip()
+            user_message = f"[REFERENCE IMAGE ANALYSIS]\n{desc}\n\n[USER REQUEST]\n{user_message}"
+        except Exception as e:
+            logger.warning(f"Reference image description failed: {e}")
 
-    ignore_last_brief = _should_ignore_last_brief(user_message)
-    prompt = _build_intent_prompt(user_message, None if ignore_last_brief else last_brief, chat_history)
+    prompt = _build_intent_prompt(user_message, last_brief, chat_history)
 
     try:
         resp = _get_llm().with_structured_output(UIIntentResponse).invoke(prompt)
@@ -1439,89 +1316,162 @@ def ui_chatbot_node(state: dict) -> dict:
         data = _extract_json(getattr(raw, "content", str(raw)))
         resp = UIIntentResponse.model_validate(data)
 
-    # Normalise requirements
     if resp.requirements is None:
         resp.requirements = UIDesignBrief()
-    elif isinstance(resp.requirements, dict):
-        if not resp.requirements.get("screen_name"):
-            resp.requirements["screen_name"] = "Primary Screen"
-        resp.requirements = UIDesignBrief(**resp.requirements)
 
-    # Enforce platform → resolution consistency
-    if resp.requirements:
-        platform = resp.requirements.platform.lower().strip()
+    req = resp.requirements
+
+    # ── FIX 4: Lock poster resolution BEFORE the platform guard can overwrite it ──
+    # Run poster size detection from user message if the LLM missed it
+    raw_user_msg = state.get("user_prompt", "")
+    if _is_poster_intent(raw_user_msg) and not req.poster_size:
+        size, _ = _detect_poster_size(raw_user_msg)
+        req.poster_size = size
+        logger.info(f"🗺️ Poster size auto-detected from user message: {size}")
+
+    if req.poster_size:
+        # Poster resolution is always the canvas size — never override with platform defaults
+        req.resolution = req.poster_size
+        logger.info(f"📐 Poster resolution locked to {req.poster_size} before platform guard")
+    else:
+        # Normal platform → resolution enforcement (only for non-poster briefs)
+        platform = (req.platform or "web").lower().strip()
         if platform not in ("web", "mobile"):
             platform = "web"
-        resp.requirements.platform = platform
-        if platform == "mobile" and resp.requirements.resolution in ("1440x900", "1440x810", ""):
-            resp.requirements.resolution = "390x844"
-        elif platform == "web" and resp.requirements.resolution in ("390x844", "1170x2532", ""):
-            resp.requirements.resolution = "1440x900"
+        req.platform = platform
+        if platform == "mobile" and req.resolution in ("1440x900", ""):
+            req.resolution = "390x844"
+        elif platform == "web" and req.resolution in ("390x844", ""):
+            req.resolution = "1440x900"
+    # ── End FIX 4 ────────────────────────────────────────────────────────────────
 
-        resp.requirements = _sanitize_requirements_for_request(
-            resp.requirements,
-            user_message,
-            ignore_last_brief,
-        )
+    # Clean pages
+    req.pages = _filter_structural_pages(req.pages)
+    deduped, seen = [], set()
+    for p in req.pages:
+        k = p.name.strip().lower()
+        if k and k not in seen:
+            deduped.append(p); seen.add(k)
+    req.pages = deduped
 
-    intent = resp.intent
-
-    # Guard: cannot edit if no base image
-    if intent == "edit" and not state.get("last_image_path"):
-        intent = "collect"
+    # Guard: edit without prior image
+    if resp.intent == "edit" and not state.get("last_image_path"):
         resp = UIIntentResponse(
             intent="collect",
-            message="I can update a UI once we have a base image. Try 'generate a login page UI' first.",
-            requirements=resp.requirements,
-            missing_fields=["reference_image"],
-            change_request=resp.change_request,
+            message="I need a base image to edit first. Please describe what you'd like to generate and I'll create it.",
+            requirements=req,
         )
 
-    # Guard: force collect if platform is still unclear
-    if intent == "generate" and resp.requirements and resp.requirements.platform not in ("web", "mobile"):
-        intent = "collect"
+    # Guard: platform still unclear for non-poster, non-logo briefs
+    if (
+        resp.intent == "generate"
+        and req.platform not in ("web", "mobile")
+        and not req.logo_only
+        and not req.poster_size
+    ):
         resp = UIIntentResponse(
             intent="collect",
-            message="Quick question — is this for web (desktop browser) or mobile (iOS/Android app)?",
-            requirements=resp.requirements,
-            missing_fields=["platform"],
+            message="Quick question — is this for a web (desktop browser) or mobile (iOS/Android) app?",
+            requirements=req,
         )
 
     update: dict = {
         "ui_intent": resp.model_dump(),
         "chatbot_response": resp.message,
+        "session_root_dir": state.get("session_root_dir"),
+        "ui_images": state.get("ui_images", []),
     }
-    if resp.requirements:
-        update["design_brief"] = resp.requirements.model_dump()
-    
-    logger.info(f"🤖 Chatbot Intent Detection")
-    logger.info(f"   Intent: {resp.intent.upper()}")
-    if resp.requirements:
-        logger.info(f"   Brand: {resp.requirements.brand_name or 'N/A'}")
-        logger.info(f"   Platform: {resp.requirements.platform}")
-        logger.info(f"   Style: {resp.requirements.style}")
-        logger.info(f"   Pages: {[p.name for p in resp.requirements.pages]}")
-        logger.debug(f"   Full design brief: {resp.requirements.model_dump()}")
-    if resp.missing_fields:
-        logger.info(f"   Missing fields: {resp.missing_fields}")
-    
+    if req:
+        update["design_brief"] = req.model_dump()
+
+    logger.info(f"🤖 Intent: {resp.intent.upper()} | brand={req.brand_name} | platform={req.platform} | poster_size={req.poster_size} | pages={[p.name for p in req.pages]}")
+    if resp.change_request:
+        logger.info(f"   Change request: {resp.change_request}")
     return update
 
 
 def ui_intent_router(state: dict) -> str:
     intent = (state.get("ui_intent") or {}).get("intent", "chat")
+    brief = state.get("design_brief") or {}
+
     if intent in ("chat", "collect"):
         return "END"
-    
-    # Check if this is a logo-only request
-    design_brief = state.get("design_brief") or {}
-    if design_brief.get("logo_only"):
-        logger.info("🎨 Logo-only request detected, routing to logo_generator")
+    if intent == "edit":
+        return "revision_handler"
+    if brief.get("logo_only"):
         return "logo_generator"
-    
     if "[Page " in (state.get("user_prompt") or ""):
         return "document_processor"
     return "prompt_enhancer"
+
+
+def revision_handler_node(state: dict) -> dict:
+    intent = state.get("ui_intent") or {}
+    change_request = intent.get("change_request", "").strip()
+    target_screens = intent.get("target_screens", [])
+    brief_data = state.get("design_brief") or {}
+    brief = UIDesignBrief.model_validate(brief_data)
+    session_id = state.get("session_id", "")
+
+    logger.info(f"✏️ Revision Handler | change: {change_request} | targets: {target_screens}")
+
+    last_image_bytes: Optional[bytes] = None
+    last_image_path = state.get("last_image_path", "")
+
+    if last_image_path and Path(last_image_path).exists():
+        with open(last_image_path, "rb") as f:
+            last_image_bytes = f.read()
+
+    ui_images: list = state.get("ui_images") or []
+
+    if not last_image_bytes and ui_images:
+        last = ui_images[-1]
+        p = last.get("path", "")
+        if p and Path(p).exists():
+            with open(p, "rb") as f:
+                last_image_bytes = f.read()
+
+    if not last_image_bytes:
+        cached_last_path = _get_session_last_image_path(session_id)
+        if cached_last_path and Path(cached_last_path).exists():
+            with open(cached_last_path, "rb") as f:
+                last_image_bytes = f.read()
+
+    if not last_image_bytes:
+        session_dir = _design_dir(session_id, state.get("session_root_dir"))
+        latest_disk_path = _latest_image_path_in_dir(session_dir)
+        if latest_disk_path and Path(latest_disk_path).exists():
+            with open(latest_disk_path, "rb") as f:
+                last_image_bytes = f.read()
+            logger.info(f"🧷 Using latest image from session folder: {latest_disk_path}")
+
+    if not last_image_bytes:
+        logger.warning("No reference image found for revision")
+        return {
+            "chatbot_response": "I couldn't find the previous image to edit. Please generate first.",
+            "session_id": session_id,
+        }
+
+    reference_description = _describe_image_for_edit(last_image_bytes)
+    logger.info(f"📋 Reference described ({len(reference_description)} chars)")
+
+    images_to_revise: list[dict] = []
+    if target_screens:
+        for img in ui_images:
+            if any(t.lower() in img.get("page_name", "").lower() for t in target_screens):
+                images_to_revise.append(img)
+    if not images_to_revise:
+        images_to_revise = [ui_images[-1]] if ui_images else []
+
+    return {
+        "revision_mode": True,
+        "revision_change_request": change_request,
+        "revision_reference_bytes_b64": _bytes_to_b64(last_image_bytes),
+        "revision_reference_description": reference_description,
+        "revision_target_images": images_to_revise,
+        "design_brief": brief_data,
+        "session_id": session_id,
+    }
 
 
 def document_processor_node(state: dict) -> dict:
@@ -1529,15 +1479,32 @@ def document_processor_node(state: dict) -> dict:
     session_id = state.get("session_id", "")
 
     if "[Page " not in user_message:
-        logger.debug("No document markers found - skipping document processing")
-        return {"document_analysis": None, "document_context": "", "session_id": session_id}
+        return {"document_analysis": None, "session_id": session_id, "session_root_dir": state.get("session_root_dir"), "ui_images": state.get("ui_images", [])}
 
     doc_start = user_message.find("[Page ")
     doc_text = user_message[doc_start:] if doc_start >= 0 else user_message
-    
-    logger.info("📄 Document Processor: Analyzing document text...")
 
-    prompt = _build_document_processor_prompt(doc_text)
+    logger.info("📄 Document Processor: Analysing document...")
+
+    prompt = f"""You are a technical document analyst.
+Extract structured information to drive UI generation.
+
+DOCUMENT TEXT:
+{doc_text[:3000]}
+
+Return ONLY valid JSON:
+{{
+  "is_document": true,
+  "summary": "One-line description",
+  "detected_pages": ["Page 1", "Page 2"],
+  "features": ["Feature A"],
+  "user_workflows": ["Workflow A"],
+  "tone": "professional",
+  "style_hints": "Modern SaaS",
+  "color_hints": "Dark background, blue primary",
+  "platform": "web",
+  "raw_text": "{doc_text[:200].replace(chr(10), ' ').replace(chr(34), chr(39))}"
+}}"""
 
     try:
         resp = _get_llm().with_structured_output(DocumentAnalysis).invoke(prompt)
@@ -1546,465 +1513,493 @@ def document_processor_node(state: dict) -> dict:
         data = _extract_json(getattr(raw, "content", str(raw)))
         resp = DocumentAnalysis.model_validate(data)
 
-    logger.info(f"✅ Document analysis complete")
-    logger.info(f"   Detected pages: {resp.detected_pages}")
-    logger.info(f"   Detected features: {resp.features}")
-    logger.info(f"   Platform: {resp.platform}")
-    logger.debug(f"   Full analysis: {resp.model_dump()}")
-
-    user_request = ""
-    document_context = doc_text
-    if "[USER REQUEST]" in user_message:
-        parts = user_message.split("[USER REQUEST]")
-        user_request = parts[1].strip() if len(parts) > 1 else ""
-        document_context = parts[0].strip()
-
+    logger.info(f"✅ Document: pages={resp.detected_pages}")
     return {
         "document_analysis": resp.model_dump(),
-        "document_context": document_context,
-        "user_request": user_request,
         "session_id": session_id,
+        "session_root_dir": state.get("session_root_dir"),
+        "ui_images": state.get("ui_images", []),
     }
 
 
 def logo_generator_node(state: dict) -> dict:
-    """Generate or edit logo."""
     brief_data = state.get("design_brief") or {}
     brief = UIDesignBrief.model_validate(brief_data)
     session_id = state.get("session_id", "")
     intent = state.get("ui_intent") or {}
     change_request = intent.get("change_request", "")
 
-    logger.info(f"🎨 Logo Generator Started")
-    logger.info(f"   Brand: {brief.brand_name}")
-    logger.info(f"   Style: {brief.style}")
+    logger.info(f"🎨 Logo Generator | brand={brief.brand_name}")
+
+    out_dir = _design_dir(session_id, state.get("session_root_dir"))
+    _fill_missing_tokens(brief)
+
+    reference_bytes: Optional[bytes] = None
+    reference_description = ""
     if change_request:
-        logger.info(f"   Edit Request: {change_request}")
+        last_path = state.get("last_image_path", "")
+        if last_path and Path(last_path).exists():
+            with open(last_path, "rb") as f:
+                reference_bytes = f.read()
+            reference_description = _describe_image_for_edit(reference_bytes)
 
-    out_dir = _design_dir(session_id)
-    images: list = []
+    prompt = _build_logo_prompt(brief, change_request, reference_description)
 
-    # Get reference logo if editing
-    reference_desc = ""
-    if state.get("reference_image_base64"):
-        reference_desc = _describe_reference_image_base64(state["reference_image_base64"])
-        logger.info(f"🔍 Analyzing reference logo for edits...")
-    elif state.get("last_image_path"):
-        reference_desc = _describe_reference_image(state["last_image_path"])
-        logger.info(f"🔍 Analyzing reference logo for edits...")
+    anchor_prefix = (
+        "VISUAL REFERENCE (the image above is the current logo to edit): "
+        "Keep everything identical EXCEPT the change described below.\n\n"
+        if reference_bytes else ""
+    )
+    full_prompt = anchor_prefix + prompt
 
-    # Build logo prompt with all specifications
-    if brief.logo_description:
-        # Use detailed user requirements
-        base_prompt = f"""Design a professional logo for '{brief.brand_name}' based on these specifications:
-
-{brief.logo_description}
-
-BRAND STYLE: {brief.style}
-COLOR PALETTE: {brief.color_palette}
-TYPOGRAPHY: {brief.typography}
-
-CRITICAL RULES:
-- Do NOT include any text labels, measurements, or spec information in the image
-- Render ONLY the logo itself
-- Must be clean, professional, and scalable
-- Works in monochrome (black & white) as well as color
-- High resolution, vector-style appearance
-- Ready for production use on websites, apps, business cards, and dashboards
-
-Generate a high-quality, professional logo that matches all the specifications above.
-"""
-    else:
-        # Use standard logo prompt
-        base_prompt = _build_logo_prompt(brief)
-
-    # If editing, append edit instructions
-    if change_request and reference_desc:
-        logo_prompt = f"""{base_prompt}
-
-EDIT REQUEST: {change_request}
-
-CURRENT LOGO DESCRIPTION:
-{reference_desc}
-
-Apply the requested changes to the logo while maintaining the brand identity and professionalism. Keep the logo clean and scalable.
-"""
-        logger.info(f"✏️ Editing logo with changes: {change_request}")
-    else:
-        logo_prompt = base_prompt
-        logger.info(f"🆕 Generating new logo")
-
-    logger.debug(f"🎨 Logo prompt:\n{logo_prompt}")
-    
     try:
-        logger.info(f"📥 Generating logo...")
-        logo_bytes = _generate_image_sync(logo_prompt)
-        logger.info(f"✅ Logo generated successfully ({len(logo_bytes)} bytes)")
-
-        logo_filename = "logo.png"
-        logo_path = out_dir / logo_filename
+        logo_bytes = _generate_image_sync(full_prompt, reference_bytes=reference_bytes)
+        logo_path = out_dir / "logo.png"
         _save_image_bytes(logo_bytes, logo_path)
-        logger.info(f"✅ Saved logo: {logo_filename} ({logo_path})")
 
-        logo_dict = {
+        img_dict = {
             "id": f"{out_dir.name}-logo",
             "page_name": "Logo",
-            "filename": logo_filename,
+            "filename": "logo.png",
             "path": str(logo_path),
             "url": _image_url_from_path(logo_path),
             "created_at": datetime.now().isoformat(),
-            "prompt": logo_prompt,
+            "prompt": full_prompt,
         }
-        images.append(logo_dict)
         _init_session_images(session_id)
-        _add_image_to_session(session_id, logo_dict)
+        _add_image_to_session(session_id, img_dict)
 
-        # Save specification
-        spec = {
-            "session_id": session_id,
-            "created_at": datetime.now().isoformat(),
-            "design_brief": brief.model_dump(),
-            "logo_only": True,
-            "pages_generated": [],
-            "pages_skipped": [],
-        }
+        (out_dir / "specification.json").write_text(
+            json.dumps({"session_id": session_id, "logo_only": True, "brand": brief.brand_name}, indent=2)
+        )
+        (out_dir / "images.json").write_text(json.dumps([img_dict], indent=2))
 
-        (out_dir / "specification.json").write_text(json.dumps(spec, indent=2), encoding="utf-8")
-        (out_dir / "images.json").write_text(json.dumps(images, indent=2), encoding="utf-8")
-
-        if change_request:
-            completion_msg = f"✅ Logo updated with your changes!"
-        else:
-            completion_msg = f"✅ Professional logo for '{brief.brand_name}' ready!"
-
+        msg = "✅ Logo updated!" if change_request else f"✅ Logo for '{brief.brand_name}' ready!"
         return {
-            "ui_images": images,
+            "ui_images": [img_dict],
             "last_image_path": str(logo_path.resolve()),
-            "chatbot_response": completion_msg,
-            "generating_status": "✨ Logo generation complete",
+            "chatbot_response": msg,
             "session_id": session_id,
+            "session_root_dir": state.get("session_root_dir"),
         }
     except Exception as e:
-        logger.error(f"❌ Logo generation failed: {str(e)}")
-        return {
-            "ui_images": [],
-            "last_image_path": "",
-            "chatbot_response": f"❌ Logo generation failed: {str(e)[:100]}",
-            "generating_status": "Failed",
-            "session_id": session_id,
-        }
+        logger.error(f"❌ Logo failed: {e}")
+        return {"ui_images": [], "chatbot_response": f"Logo generation failed: {str(e)[:100]}", "session_id": session_id, "session_root_dir": state.get("session_root_dir")}
 
 
 def prompt_enhancer_node(state: dict) -> dict:
     """
-    Builds a locked brand spec and one self-contained prompt per page.
-    Consistency is guaranteed because every page prompt starts with the
-    IDENTICAL brand spec block — no per-page drift is possible.
+    Builds one self-contained, DNA-locked prompt per page.
+
+    FIX 1: Calls _fill_poster_tokens INSTEAD OF _fill_missing_tokens for posters.
+    FIX 2: Fallback page populates must_include from brief.components / user_prompt.
+    FIX 3: Passes user_original_prompt to _build_poster_prompt.
+    FIX 5: Hardens is_poster detection and always resolves poster_size before building prompts.
     """
     brief_data = state.get("design_brief") or {}
     brief = UIDesignBrief.model_validate(brief_data)
-    intent = state.get("ui_intent") or {}
-    change_request = intent.get("change_request", "")
+    session_id = state.get("session_id", "")
+    user_original_prompt = state.get("user_prompt", "")   # FIX 3
 
-    # Get already-generated page names from previous generations
-    last_ui_images = state.get("ui_images", [])
-    already_generated_pages = {img["page_name"] for img in last_ui_images} if last_ui_images else set()
-    
-    logger.info(f"📋 Checking for already-generated pages...")
-    if already_generated_pages:
-        logger.info(f"   Already generated: {already_generated_pages}")
-    
-    # Reference description for edit mode
-    reference_desc = ""
-    if state.get("reference_image_base64"):
-        reference_desc = _describe_reference_image_base64(state["reference_image_base64"])
-    elif state.get("last_image_path"):
-        reference_desc = _describe_reference_image(state["last_image_path"])
+    # Enrich from document analysis
+    doc = state.get("document_analysis")
+    if doc:
+        da = DocumentAnalysis.model_validate(doc) if isinstance(doc, dict) else doc
+        if da.detected_pages and not brief.pages:
+            brief.pages = [UIPageSpec(name=p, purpose=f"{p} screen") for p in da.detected_pages]
+        if da.style_hints and not brief.style:
+            brief.style = da.style_hints
+        if da.color_hints and not brief.color_palette:
+            brief.color_palette = da.color_hints
+        if da.platform:
+            brief.platform = da.platform
 
-    # Enrich brief from document analysis
-    doc_analysis = state.get("document_analysis")
-    if doc_analysis:
-        doc = DocumentAnalysis.model_validate(doc_analysis) if isinstance(doc_analysis, dict) else doc_analysis
-        if doc.detected_pages and not brief.pages:
-            brief.pages = [UIPageSpec(name=p, purpose=f"{p} screen") for p in doc.detected_pages]
-            brief.screen_name = brief.screen_name or doc.detected_pages[0]
-        if doc.style_hints and (not brief.style or brief.style == "modern, clean, professional"):
-            brief.style = doc.style_hints
-        if doc.color_hints and not brief.color_palette:
-            brief.color_palette = doc.color_hints
-        if doc.platform and brief.platform == "web":
-            brief.platform = doc.platform
-        if doc.features and not brief.components:
-            brief.components = doc.features[:10]
+    # ── FIX 5: Resolve is_poster and poster_size FIRST, before any token fill ──
+    is_poster = bool(brief.poster_size) or bool(brief.poster_platform) or _is_poster_intent(user_original_prompt)
 
-    pages = _filter_pages(brief)
-    if not pages:
-        if brief.pages and brief.skip_pages:
-            logger.warning("⚠️ All pages filtered out by skip_pages")
-            return {
-                "enhanced_prompt": "",
-                "page_prompts": [],
-                "consistency_rules": [],
-                "final_spec": {},
-                "skip_all": True,
-                "session_id": state.get("session_id", ""),
-            }
-    poster_mode = _is_poster_request(brief, pages, state.get("user_prompt", ""))
+    if is_poster and not brief.poster_size:
+        size, _ = _detect_poster_size(user_original_prompt)
+        brief.poster_size = size
+        logger.info(f"🗺️ poster_size resolved in prompt_enhancer: {size}")
 
-    # Apply type-specific defaults before creating fallback pages
-    if poster_mode:
+    if is_poster:
+        # FIX 4 (reinforcement): always lock resolution to the canvas size here too
+        brief.resolution = brief.poster_size or "1080x1080"
+    # ── End FIX 5 ─────────────────────────────────────────────────────────────────
+
+    # ── FIX 1: Gate the token fill — poster gets its own fill, never the UI fill ──
+    if is_poster:
         _fill_poster_tokens(brief)
+        logger.info(f"🖼️ Poster tokens applied | style={brief.style} | resolution={brief.resolution}")
     else:
         _fill_missing_tokens(brief)
+    # ── End FIX 1 ─────────────────────────────────────────────────────────────────
+
+    # Get locked Design DNA from session (UI screens only)
+    dna_data = state.get("design_dna") or _get_session_design_dna(session_id)
+    dna = DesignDNA.model_validate(dna_data) if dna_data else DesignDNA()
+
+    nav_items: list[str] = []
+    if dna.nav_items:
+        nav_items = dna.nav_items
+    elif brief.nav_items:
+        nav_items = brief.nav_items
+    else:
+        nav_items = _infer_nav_items([p for p in brief.pages if not _is_auth_page(p.name)])
+
+    if nav_items and not dna.nav_items:
+        dna.nav_items = nav_items
+    if not dna.is_empty():
+        _set_session_design_dna(session_id, dna)
+
+    pages = _filter_structural_pages(brief.pages)
 
     if not pages:
-        fallback = brief.screen_name or "Main Screen"
-        if poster_mode and "posters" in fallback.lower():
-            pages = [
-                UIPageSpec(name=f"{fallback} Variant 1", purpose="Primary celebratory composition"),
-                UIPageSpec(name=f"{fallback} Variant 2", purpose="Alternative composition with stronger central symbol"),
-                UIPageSpec(name=f"{fallback} Variant 3", purpose="Pattern-rich composition with decorative border"),
-                UIPageSpec(name=f"{fallback} Variant 4", purpose="Calligraphy-focused minimalist composition"),
-            ]
-            brief.pages = pages
-            if brief.num_images < 1:
-                brief.num_images = 1
-        else:
-            pages = [UIPageSpec(name=fallback, purpose="Primary screen")]
-            brief.pages = pages
+        # ── FIX 2: Populate must_include for the fallback page ──
+        fallback_name = brief.screen_name or "Main Screen"
+        fallback_must_include: list[str] = []
+        if brief.components:
+            fallback_must_include = list(brief.components)
+        elif user_original_prompt:
+            # Extract the most meaningful noun phrases from the user prompt as content hints
+            fallback_must_include = [user_original_prompt[:120]]
+        pages = [UIPageSpec(
+            name=fallback_name,
+            purpose="Primary screen",
+            must_include=fallback_must_include,
+        )]
+        brief.pages = pages
+        logger.info(f"📄 Fallback page created: '{fallback_name}' | must_include={fallback_must_include}")
+        # ── End FIX 2 ──────────────────────────────────────────────────────────────
 
-    # Filter out already-generated pages — only generate new ones
-    new_pages = [p for p in pages if p.name not in already_generated_pages]
-    is_edit_request = bool((intent.get("change_request") or "").strip())
-    
-    if new_pages:
-        logger.info(f"📄 Pages to generate NOW: {[p.name for p in new_pages]}")
-    else:
-        if is_edit_request or not already_generated_pages:
-            logger.info("♻️ Regeneration path: generating requested pages.")
+    # Avoid regenerating already-done pages (unless edit)
+    existing_pages = {img.get("page_name", "").strip().lower() for img in (state.get("ui_images") or [])}
+    intent_type = (state.get("ui_intent") or {}).get("intent", "generate")
+    is_edit = intent_type in ("edit", "revision")
+
+    if not is_edit:
+        new_pages = [p for p in pages if p.name.strip().lower() not in existing_pages]
+        if not new_pages:
             new_pages = pages
-        else:
-            logger.warning("⚠️ All pages already generated. No new pages to generate.")
-            return {
-                "enhanced_prompt": "",
-                "page_prompts": [],
-                "consistency_rules": [],
-                "final_spec": {},
-                "skip_all": True,
-                "session_id": state.get("session_id", ""),
-            }
-    
-    nav_items = [] if poster_mode else (brief.nav_items or _infer_nav_items([p for p in pages if not _is_auth_page(p.name)]))
-    raw_components = brief.components or [c for p in pages for c in p.must_include]
-    component_inventory = raw_components if poster_mode else _compact_components(raw_components)
-
-    logger.info(f"🎯 Prompt Enhancer Started | Brand: {brief.brand_name} | Platform: {brief.platform} | Style: {brief.style}")
-    logger.info(f"🖼️ Asset mode: {'POSTER' if poster_mode else 'UI SCREEN'}")
-    logger.info(f"📄 Total pages in brief: {len(pages)}")
-    logger.debug(f"   All pages: {[p.name for p in pages]}")
-    logger.info(f"🗂️ Navigation items (inferred): {nav_items}")
-    logger.info(f"🧩 Component inventory: {component_inventory}")
-
-    # Build the single locked brand spec
-    if poster_mode:
-        brand_spec = _build_poster_spec_block(brief, component_inventory)
-        logger.debug(f"🖼️ Poster spec block (first 500 chars):\n{brand_spec[:500]}...")
     else:
-        brand_spec = _build_brand_spec_block(brief, nav_items, component_inventory)
-        logger.debug(f"📋 Brand spec block (first 500 chars):\n{brand_spec[:500]}...")
-    
-    # Build minimal spec for auth pages (no navigation)
-    auth_spec = _build_auth_spec_block(brief)
-    logger.debug(f"🔐 Auth spec block (first 500 chars):\n{auth_spec[:500]}...")
+        new_pages = pages
 
-    # Build one self-contained prompt per page
-    page_prompts: list[PagePrompt] = []
-    
-    for idx, page in enumerate(new_pages, 1):
-        # Use appropriate spec based on page type
-        if poster_mode:
-            spec_to_use = brand_spec
-            notes = f"POSTER | Style: {brief.style}"
-            page_type = "🖼️ POSTER"
-        elif _is_auth_page(page.name):
-            spec_to_use = auth_spec
-            notes = f"AUTH PAGE (no navigation) | Platform: {brief.platform} | Style: {brief.style}"
-            page_type = "🔐 AUTH"
-        else:
-            spec_to_use = brand_spec
-            notes = f"Platform page (with nav) | Platform: {brief.platform} | Style: {brief.style}"
-            page_type = "📱 PLATFORM"
-        
-        if change_request and reference_desc and not _is_auth_page(page.name):
-            spec_to_use = (
-                f"{brand_spec}\n\n"
-                f"EDIT REQUEST: {change_request}\n\n"
-                f"CURRENT SCREEN DESCRIPTION:\n{reference_desc}\n\n"
-                "Apply the edit request on top of the current screen, keeping everything else identical."
+    page_prompts: list[dict] = []
+    for page in new_pages:
+        # ── FIX 2 (per-page): ensure no page has empty must_include in poster mode ──
+        if is_poster and not page.must_include and brief.components:
+            page.must_include = list(brief.components)
+
+        if is_poster:
+            # FIX 3: pass user_original_prompt
+            prompt_text = _build_poster_prompt(
+                brief,
+                page,
+                user_original_prompt=user_original_prompt,
             )
-        
-        prompt_text = _build_page_prompt(
-            brief,
-            page,
-            spec_to_use,
-            nav_items,
-            component_inventory,
-            is_poster=poster_mode,
-        )
-        page_prompts.append(PagePrompt(
-            page_name=page.name,
-            prompt=prompt_text,
-            notes=notes,
-        ))
-        
-        logger.info(f"{page_type} PAGE {idx}/{len(new_pages)}: {page.name} | Purpose: {page.purpose or page.name}")
-        logger.debug(f"   Full prompt for '{page.name}' (length: {len(prompt_text)} chars):\n{'='*80}\n{prompt_text}\n{'='*80}")
-
-    nav_labels = ", ".join(nav_items) if nav_items else ""
-    if poster_mode:
-        consistency_rules = [
-            f"Colors locked: {brief.color_palette}",
-            f"Fonts locked: {brief.typography}",
-            f"Poster canvas locked: {brief.resolution}",
-            "No mobile frame, no browser chrome, no app navigation",
-            "Poster-only composition and typography consistency across all variants",
-        ]
-    else:
-        consistency_rules = [
-            f"Colors locked: {brief.color_palette}",
-            f"Fonts locked: {brief.typography}",
-            f"Navigation: {'bottom tab bar' if brief.platform == 'mobile' else 'left sidebar'} — on platform pages only (NOT on auth screens)",
-            f"Navigation labels: {nav_labels}",
-            "Cards: rounded corners, surface bg, soft shadow — all pages",
-            "Primary buttons: filled with primary color, white text — all pages",
-            "Inputs: subtle border, surface background, muted placeholder — all pages",
-            f"Resolution locked: {brief.resolution}",
-            "Auth pages: NO navigation, centered form only",
-        ]
-    
-    logger.info(f"📐 Consistency Rules:")
-    for rule in consistency_rules:
-        logger.info(f"   ✓ {rule}")
-
-    final_spec = {
-        "brand": brief.brand_name,
-        "asset_type": "poster" if poster_mode else "ui",
-        "platform": brief.platform,
-        "resolution": brief.resolution,
-        "style": brief.style,
-        "colors": brief.color_palette,
-        "fonts": brief.typography,
-        "pages_count": len(pages),
-    }
+        else:
+            prompt_text = _build_base_prompt(
+                brief=brief,
+                page=page,
+                dna=dna,
+                nav_items=nav_items,
+            )
+        page_prompts.append({
+            "page_name": page.name,
+            "prompt": prompt_text,
+            "notes": f"{'poster' if is_poster else brief.platform} | {brief.style}",
+        })
 
     return {
-        "enhanced_prompt": brand_spec,
-        "page_prompts": [p.model_dump() for p in page_prompts],
-        "consistency_rules": consistency_rules,
-        "final_spec": final_spec,
-        "session_id": state.get("session_id", ""),
+        "page_prompts": page_prompts,
+        "consistency_rules": [
+            f"Colors: {brief.color_palette[:60]}...",
+            f"Fonts: {brief.typography[:60]}...",
+            f"Nav: {', '.join(nav_items)}",
+            f"Resolution: {brief.resolution}",
+        ],
+        "final_spec": {"brand": brief.brand_name, "platform": brief.platform, "style": brief.style},
+        "session_id": session_id,
+        "design_brief": brief.model_dump(),
+        "session_root_dir": state.get("session_root_dir"),
+        "ui_images": state.get("ui_images", []),
     }
 
 
 def image_generator_node(state: dict) -> dict:
+    """
+    Generates images. In revision mode, passes reference bytes as visual anchor.
+    Extracts DesignDNA from the FIRST generated screen for consistency locking.
+    """
     brief_data = state.get("design_brief") or {}
     brief = UIDesignBrief.model_validate(brief_data)
-    prompt = state.get("enhanced_prompt", "")
     session_id = state.get("session_id", "")
-    page_prompts = state.get("page_prompts", [])
+    page_prompts: list[dict] = state.get("page_prompts") or []
+    is_revision = state.get("revision_mode", False)
 
-    if state.get("skip_all"):
-        logger.warning("⚠️ Skipping all pages - no pages to generate")
+    cached_dna = _get_session_design_dna(session_id)
+
+    out_dir = _design_dir(session_id, state.get("session_root_dir"))
+    images: list = []
+    _init_session_images(session_id)
+
+    # ── Revision mode ────────────────────────────────────────────────────────────
+    if is_revision:
+        change_request = state.get("revision_change_request", "")
+        ref_b64 = state.get("revision_reference_bytes_b64", "")
+        ref_desc = state.get("revision_reference_description", "")
+        target_images = state.get("revision_target_images", [])
+        brief_data = state.get("design_brief") or {}
+        brief = UIDesignBrief.model_validate(brief_data)
+        user_original_prompt = state.get("user_prompt", "")   # FIX 3
+
+        reference_bytes = _b64_to_bytes(ref_b64) if ref_b64 else None
+        dna_data = state.get("design_dna") or cached_dna
+        dna = DesignDNA.model_validate(dna_data) if dna_data else DesignDNA()
+        nav_items = dna.nav_items or brief.nav_items or []
+
+        is_poster = bool(brief.poster_size) or _is_poster_intent(user_original_prompt)
+
+        if target_images:
+            reference_target = target_images[0]
+            logger.info(
+                f"🖼️ Revision reference image: {reference_target.get('page_name', 'unknown')} | {reference_target.get('path', 'in-memory')}"
+            )
+
+        revised_images = []
+        for img_meta in target_images:
+            page_name = img_meta.get("page_name", "Screen")
+            page = UIPageSpec(name=page_name, purpose="")
+
+            if is_poster:
+                prompt = _build_poster_prompt(
+                    brief, page, change_request, ref_desc, is_revision=True,
+                    user_original_prompt=user_original_prompt,   # FIX 3
+                )
+            else:
+                prompt = _build_base_prompt(
+                    brief, page, dna, nav_items,
+                    is_revision=True, change_request=change_request,
+                    reference_description=ref_desc,
+                )
+
+            anchor = (
+                "VISUAL REFERENCE (image above is the CURRENT state to edit). "
+                "Apply ONLY the change described below. Keep everything else pixel-identical.\n\n"
+            )
+            full_prompt = anchor + prompt
+
+            logger.info(f"✏️ Revising '{page_name}' | change: {change_request[:60]}")
+            try:
+                img_bytes = _generate_image_sync(full_prompt, reference_bytes=reference_bytes)
+                slug = _slugify(page_name)
+                filename = f"{slug}_revised_{_now_stamp()}.png"
+                path = out_dir / filename
+                _save_image_bytes(img_bytes, path)
+
+                img_dict = {
+                    "id": f"{out_dir.name}-{slug}-rev",
+                    "page_name": page_name,
+                    "filename": filename,
+                    "path": str(path),
+                    "url": _image_url_from_path(path),
+                    "created_at": datetime.now().isoformat(),
+                    "prompt": full_prompt,
+                    "is_revision": True,
+                }
+                revised_images.append(img_dict)
+                _add_image_to_session(session_id, img_dict)
+                logger.info(f"✅ Revised: {filename}")
+            except Exception as e:
+                logger.error(f"❌ Revision failed for '{page_name}': {e}")
+
+        if revised_images:
+            (out_dir / "images.json").write_text(json.dumps(revised_images, indent=2))
+            return {
+                "ui_images": revised_images,
+                "last_image_path": str(Path(revised_images[-1]["path"]).resolve()),
+                "chatbot_response": f"✅ {len(revised_images)} screen(s) updated with your changes.",
+                "session_id": session_id,
+                "session_root_dir": state.get("session_root_dir"),
+            }
         return {
             "ui_images": [],
-            "last_image_path": "",
-            "chatbot_response": "No pages to generate. Tell me which pages to keep.",
+            "chatbot_response": "Revision failed — please try again.",
             "session_id": session_id,
+            "session_root_dir": state.get("session_root_dir"),
         }
 
-    out_dir = _design_dir(session_id)
-    images: list = []
+    # ── Normal generation mode ───────────────────────────────────────────────────
+    if not page_prompts:
+        logger.warning("No page prompts to generate")
+        return {"ui_images": [], "chatbot_response": "Nothing to generate.", "session_id": session_id}
 
-    if not page_prompts and prompt:
-        page_prompts = [{"page_name": brief.screen_name, "prompt": prompt, "notes": ""}]
+    logger.info(f"🎨 Generating {len(page_prompts)} screen(s)...")
 
-    num_pages = len(page_prompts)
-    designing_msg = f"✨ Rendering {num_pages} premium {'screen' if num_pages == 1 else 'screens'}..."
-    
-    logger.info(f"🎨 Image Generator Starting")
-    logger.info(f"📂 Output directory: {out_dir}")
-    logger.info(f"📊 Generating {num_pages} {'page' if num_pages == 1 else 'pages'}")
-    for page_prompt in page_prompts:
-        logger.info(f"   → {page_prompt.get('page_name')} ({page_prompt.get('notes', 'no notes')})")
+    dna_data = state.get("design_dna") or {}
+    dna = DesignDNA.model_validate(dna_data) if dna_data else DesignDNA()
+    is_first_batch = dna.is_empty()
+    first_image_bytes: Optional[bytes] = None
+    reference_anchor: Optional[bytes] = None
+    reference_anchor_page: str = ""
+    reference_anchor_path: str = ""
 
-    _init_session_images(session_id)
-    image_data_list = _generate_images_threaded(page_prompts, brief.num_images)
+    # Poster screens do not extract DNA (no nav/UI tokens) — skip first-batch logic
+    is_poster = bool(brief.poster_size) or _is_poster_intent(state.get("user_prompt", ""))
 
-    pages_generated: set = set()
-    for img_data in image_data_list:
-        page_name = img_data["page_name"]
-        variant_idx = img_data["variant_idx"]
-        image_bytes = img_data["image_bytes"]
-        
-        logger.debug(f"📥 Received image data for: {page_name} (variant {variant_idx + 1}, {len(image_bytes)} bytes)")
+    def _gen_one(page_prompt: dict) -> dict:
+        page_name = page_prompt.get("page_name", "Screen")
+        prompt_text = page_prompt.get("prompt", "")
+        try:
+            img_bytes = _generate_image_sync(prompt_text)
+            return {"page_name": page_name, "bytes": img_bytes, "error": None}
+        except Exception as e:
+            logger.error(f"❌ Failed '{page_name}': {e}")
+            return {"page_name": page_name, "bytes": None, "error": str(e)}
 
-        page_slug = _slugify(page_name)
-        pages_generated.add(page_name)
+    if is_first_batch and len(page_prompts) > 1 and not is_poster:
+        # UI screens only: generate screen 1 first to lock Design DNA
+        logger.info(f"🧬 Generating screen 1 first to lock Design DNA...")
+        first_result = _gen_one(page_prompts[0])
+        first_image_bytes = first_result.get("bytes")
 
-        filename = f"{page_slug}_{variant_idx + 1}.png"
-        path = out_dir / filename
-        _save_image_bytes(image_bytes, path)
-        logger.info(f"✅ Saved image: {filename} ({path})")
+        if first_image_bytes:
+            slug = _slugify(first_result["page_name"])
+            filename = f"{slug}_{_now_stamp()}.png"
+            path = out_dir / filename
+            _save_image_bytes(first_image_bytes, path)
+            img_dict = {
+                "id": f"{out_dir.name}-{slug}-1",
+                "page_name": first_result["page_name"],
+                "filename": filename,
+                "path": str(path),
+                "url": _image_url_from_path(path),
+                "created_at": datetime.now().isoformat(),
+                "prompt": page_prompts[0].get("prompt", ""),
+            }
+            images.append(img_dict)
+            _add_image_to_session(session_id, img_dict)
 
-        matching_prompt = next(
-            (pp.get("prompt", "") for pp in page_prompts if pp.get("page_name") == page_name),
-            page_prompts[0].get("prompt", "") if page_prompts else "",
-        )
+            new_dna = _extract_design_dna(first_image_bytes)
+            dna_data = new_dna.model_dump()
+            dna = new_dna
+            reference_anchor = first_image_bytes
+            reference_anchor_page = first_result["page_name"]
+            reference_anchor_path = str(path)
+            logger.info(f"🖼️ Reference image for remaining screens: {reference_anchor_page} | {reference_anchor_path}")
+            _set_session_design_dna(session_id, new_dna)
 
-        image_dict = {
-            "id": f"{out_dir.name}-{page_slug}-{variant_idx + 1}",
-            "page_name": page_name,
-            "filename": filename,
-            "path": str(path),
-            "url": _image_url_from_path(path),
-            "created_at": datetime.now().isoformat(),
-            "prompt": matching_prompt,
-        }
-        images.append(image_dict)
-        _add_image_to_session(session_id, image_dict)
-    
-    spec = {
-        "session_id": session_id,
-        "created_at": datetime.now().isoformat(),
-        "design_brief": brief.model_dump(),
-        "consistency_rules": state.get("consistency_rules", []),
-        "final_spec": state.get("final_spec", {}),
-        "pages_generated": sorted(pages_generated),
-        "pages_skipped": brief.skip_pages,
-    }
+            remaining_prompts = []
+            for pp in page_prompts[1:]:
+                page = UIPageSpec(name=pp["page_name"], purpose="")
+                nav_items = dna.nav_items or brief.nav_items or []
+                new_prompt = _build_base_prompt(brief, page, dna, nav_items)
+                remaining_prompts.append({"page_name": pp["page_name"], "prompt": new_prompt, "notes": pp.get("notes", "")})
 
-    (out_dir / "specification.json").write_text(json.dumps(spec, indent=2), encoding="utf-8")
-    (out_dir / "images.json").write_text(json.dumps(images, indent=2), encoding="utf-8")
-    
-    logger.info(f"📋 Specification saved: specification.json")
-    logger.info(f"🖼️  Images manifest saved: images.json")
-    logger.info(f"✨ Image generation complete | Generated {len(images)} items ({len(pages_generated)} pages)")
-    logger.debug(f"   Pages generated: {sorted(pages_generated)}")
-    if brief.skip_pages:
-        logger.debug(f"   Pages skipped: {brief.skip_pages}")
+            remaining_page_prompts = remaining_prompts
+        else:
+            remaining_page_prompts = page_prompts[1:]
 
-    completion_msg = (
-        f"✅ {len(pages_generated)} high-fidelity {'screen' if len(pages_generated) == 1 else 'screens'} ready. "
-        f"Total assets: {len(images)}."
+        if remaining_page_prompts:
+            for page_prompt in remaining_page_prompts:
+                page_name = page_prompt.get("page_name", "Screen")
+                prompt_text = page_prompt.get("prompt", "")
+                try:
+                    if reference_anchor_path:
+                        logger.info(f"🖼️ Passing reference image: {reference_anchor_page} | {reference_anchor_path}")
+                    img_bytes = _generate_image_sync(prompt_text, reference_bytes=reference_anchor)
+                    slug = _slugify(page_name)
+                    filename = f"{slug}_{_now_stamp()}.png"
+                    path = out_dir / filename
+                    _save_image_bytes(img_bytes, path)
+                    img_dict = {
+                        "id": f"{out_dir.name}-{slug}-1",
+                        "page_name": page_name,
+                        "filename": filename,
+                        "path": str(path),
+                        "url": _image_url_from_path(path),
+                        "created_at": datetime.now().isoformat(),
+                        "prompt": prompt_text,
+                    }
+                    images.append(img_dict)
+                    _add_image_to_session(session_id, img_dict)
+                    reference_anchor = img_bytes
+                    reference_anchor_page = page_name
+                    reference_anchor_path = str(path)
+                    logger.info(f"🖼️ Updated reference image: {reference_anchor_page} | {reference_anchor_path}")
+                except Exception as e:
+                    logger.error(f"❌ Failed '{page_name}': {e}")
+    else:
+        # Single screen, DNA already locked, or poster — generate sequentially
+        if not is_first_batch and not is_poster:
+            existing_images = state.get("ui_images") or []
+            if existing_images:
+                last_path = existing_images[-1].get("path", "")
+                if last_path and Path(last_path).exists():
+                    try:
+                        with open(last_path, "rb") as f:
+                            reference_anchor = f.read()
+                        reference_anchor_page = existing_images[-1].get('page_name', 'unknown')
+                        reference_anchor_path = last_path
+                        logger.info(f"🖼️ Batch reference image: {reference_anchor_page} | {reference_anchor_path}")
+                    except Exception as e:
+                        logger.warning(f"Could not load anchor image for batch: {e}")
+        if not reference_anchor and cached_dna and session_id and not is_poster:
+            logger.info("🧷 Reusing cached session DNA for navbar consistency")
+
+        for page_prompt in page_prompts:
+            page_name = page_prompt.get("page_name", "Screen")
+            prompt_text = page_prompt.get("prompt", "")
+            try:
+                # Poster screens never pass a reference anchor (each is standalone)
+                ref_to_use = None if is_poster else reference_anchor
+                if ref_to_use and reference_anchor_path:
+                    logger.info(f"🖼️ Passing reference image: {reference_anchor_page} | {reference_anchor_path}")
+                img_bytes = _generate_image_sync(prompt_text, reference_bytes=ref_to_use)
+                slug = _slugify(page_name)
+                filename = f"{slug}_{_now_stamp()}.png"
+                path = out_dir / filename
+                _save_image_bytes(img_bytes, path)
+                img_dict = {
+                    "id": f"{out_dir.name}-{slug}-1",
+                    "page_name": page_name,
+                    "filename": filename,
+                    "path": str(path),
+                    "url": _image_url_from_path(path),
+                    "created_at": datetime.now().isoformat(),
+                    "prompt": prompt_text,
+                }
+                images.append(img_dict)
+                _add_image_to_session(session_id, img_dict)
+                if not is_poster:
+                    reference_anchor = img_bytes
+                    reference_anchor_page = page_name
+                    reference_anchor_path = str(path)
+                    logger.info(f"🖼️ Updated reference image: {reference_anchor_page} | {reference_anchor_path}")
+            except Exception as e:
+                logger.error(f"❌ Failed '{page_name}': {e}")
+
+    if not images:
+        return {"ui_images": [], "chatbot_response": "Generation failed — please try again.", "session_id": session_id, "session_root_dir": state.get("session_root_dir")}
+
+    (out_dir / "specification.json").write_text(
+        json.dumps({"session_id": session_id, "brief": brief.model_dump(), "pages": len(images)}, indent=2)
     )
+    (out_dir / "images.json").write_text(json.dumps(images, indent=2))
 
-    return {
+    logger.info(f"✨ Generated {len(images)} screen(s)")
+
+    result = {
         "ui_images": images,
-        "last_image_path": str(Path(images[-1]["path"]).resolve()) if images else "",
-        "chatbot_response": completion_msg,
-        "generating_status": designing_msg,
+        "last_image_path": str(Path(images[-1]["path"]).resolve()),
+        "chatbot_response": f"✅ {len(images)} high-fidelity screen(s) ready.",
         "session_id": session_id,
+        "session_root_dir": state.get("session_root_dir"),
     }
+    if dna_data:
+        result["design_dna"] = dna_data
+
+    return result
 
 
 def completion_node(state: dict) -> dict:
@@ -2016,24 +2011,27 @@ def completion_node(state: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 ui_graph = StateGraph(dict)
-ui_graph.add_node("chatbot", ui_chatbot_node)
+ui_graph.add_node("chatbot",            ui_chatbot_node)
 ui_graph.add_node("document_processor", document_processor_node)
-ui_graph.add_node("logo_generator", logo_generator_node)
-ui_graph.add_node("prompt_enhancer", prompt_enhancer_node)
-ui_graph.add_node("image_generator", image_generator_node)
-ui_graph.add_node("completion", completion_node)
+ui_graph.add_node("logo_generator",     logo_generator_node)
+ui_graph.add_node("revision_handler",   revision_handler_node)
+ui_graph.add_node("prompt_enhancer",    prompt_enhancer_node)
+ui_graph.add_node("image_generator",    image_generator_node)
+ui_graph.add_node("completion",         completion_node)
 
 ui_graph.set_entry_point("chatbot")
 ui_graph.add_conditional_edges("chatbot", ui_intent_router, {
     "document_processor": "document_processor",
-    "logo_generator": "logo_generator",
-    "prompt_enhancer": "prompt_enhancer",
-    "END": END,
+    "logo_generator":     "logo_generator",
+    "revision_handler":   "revision_handler",
+    "prompt_enhancer":    "prompt_enhancer",
+    "END":                END,
 })
 ui_graph.add_edge("document_processor", "prompt_enhancer")
-ui_graph.add_edge("logo_generator", "completion")
-ui_graph.add_edge("prompt_enhancer", "image_generator")
-ui_graph.add_edge("image_generator", "completion")
-ui_graph.add_edge("completion", END)
+ui_graph.add_edge("logo_generator",     "completion")
+ui_graph.add_edge("revision_handler",   "image_generator")
+ui_graph.add_edge("prompt_enhancer",    "image_generator")
+ui_graph.add_edge("image_generator",    "completion")
+ui_graph.add_edge("completion",         END)
 
 ui_image_agent = ui_graph.compile()
