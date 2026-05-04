@@ -35,6 +35,22 @@ app.add_middleware(
 sessions: dict = {}
 executor = ThreadPoolExecutor(max_workers=4)
 MAX_SESSION_MESSAGES = 100
+UI_DESIGNS_ROOT = Path(__file__).resolve().parent / "ui_designs"
+UI_DESIGNS_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def _latest_image_path_in_dir(directory: Path) -> str:
+    if not directory.exists():
+        return ""
+
+    image_files = sorted(
+        [
+            path for path in directory.rglob("*")
+            if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+        ],
+        key=lambda path: path.stat().st_mtime,
+    )
+    return str(image_files[-1].resolve()) if image_files else ""
 
 NODE_PROGRESS = {
     "chatbot": 10,
@@ -214,6 +230,8 @@ async def websocket_ui_designer(websocket: WebSocket, session_id: str):
     await manager.connect(websocket, session_id)
 
     if session_id not in sessions:
+        session_dir = UI_DESIGNS_ROOT / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
         sessions[session_id] = {
             "status": "idle",
             "current_node": None,
@@ -224,6 +242,7 @@ async def websocket_ui_designer(websocket: WebSocket, session_id: str):
             "ui_images": [],
             "design_brief": None,
             "reference_image_base64": None,
+            "session_root_dir": str(session_dir),
         }
 
     sent_image_ids: set = set()
@@ -249,6 +268,11 @@ async def websocket_ui_designer(websocket: WebSocket, session_id: str):
             if reference_image:
                 sessions[session_id]["reference_image_base64"] = reference_image
 
+            if not sessions[session_id].get("last_image_path"):
+                latest_session_image = _latest_image_path_in_dir(Path(sessions[session_id]["session_root_dir"]))
+                if latest_session_image:
+                    sessions[session_id]["last_image_path"] = latest_session_image
+
             sessions[session_id]["status"] = "running"
             sessions[session_id]["progress"] = 0
             sent_image_ids.clear()
@@ -256,6 +280,7 @@ async def websocket_ui_designer(websocket: WebSocket, session_id: str):
             initial_state = {
                 "user_prompt": user_message,
                 "session_id": session_id,
+                "session_root_dir": sessions[session_id].get("session_root_dir"),
                 "last_image_path": sessions[session_id].get("last_image_path", ""),
                 "design_brief": sessions[session_id].get("design_brief"),
                 "reference_image_base64": sessions[session_id].get("reference_image_base64"),
