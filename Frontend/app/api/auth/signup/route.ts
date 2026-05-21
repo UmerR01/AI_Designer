@@ -59,11 +59,11 @@ export async function POST(_req_: Request) {
       first_name: string;
       last_name: string;
     }>`
-      insert into users (email, first_name, last_name, password_hash)
-      values (${email.toLowerCase()}, ${first_name}, ${last_name}, ${passwordHash})
+      insert into users (email, first_name, last_name, password_hash, email_verified)
+      values (${email.toLowerCase()}, ${first_name}, ${last_name}, ${passwordHash}, false)
       returning id, email, first_name, last_name
     `;
- 
+
     const user = created[0];
     
     // Generate verification token
@@ -76,10 +76,10 @@ export async function POST(_req_: Request) {
       const transporter = nodemailer.createTransport({
         host: process.env.EMAIL_HOST || "smtp.gmail.com",
         port: Number(process.env.EMAIL_PORT) || 587,
-        secure: false, // STARTTLS
+        secure: (Number(process.env.EMAIL_PORT) || 587) === 465,
         auth: {
           user: process.env.EMAIL_HOST_USER,
-          pass: process.env.EMAIL_HOST_PASSWORD,
+          pass: (process.env.EMAIL_HOST_PASSWORD || "").replace(/\s+/g, ""),
         },
       });
 

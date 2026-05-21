@@ -18,6 +18,7 @@ export type EditorTreeNode =
     position?: { x: number; y: number };
     width?: number;
     height?: number;
+    unit?: "px" | "inch" | "cm" | "m";
   };
 
 /**
@@ -231,4 +232,20 @@ export function duplicateNodeById(nodes: EditorTreeNode[], id: string): EditorTr
   }
   return result;
 }
+
+export function convertToPx(value: number, unit?: string): number {
+  if (!unit) return value;
+  switch (unit) {
+    case "inch":
+      return value * 96;
+    case "cm":
+      return value * (96 / 2.54);
+    case "m":
+      return value * (9600 / 2.54);
+    case "px":
+    default:
+      return value;
+  }
+}
+
 

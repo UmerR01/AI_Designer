@@ -99,7 +99,13 @@ export async function POST(_req_: Request) {
     maxAgeSeconds
   );
  
-  const res = NextResponse.json({ user: { id: user.id, email: user.email } });
+  const res = NextResponse.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      is_support_agent: Boolean(user.is_support_agent),
+    },
+  });
   res.cookies.set(SESSION_COOKIE_NAME, token, {
     httpOnly: true,
     sameSite: "lax",

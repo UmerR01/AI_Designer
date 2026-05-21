@@ -47,7 +47,9 @@ import {
   addSectionToScreen,
   renameNodeById,
   duplicateNodeById,
+  convertToPx,
 } from "@/lib/editor-project";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -290,6 +292,13 @@ export default function ProjectEditorPage() {
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
   const [hydrated, setHydrated] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+
+  // Customizable Artboard Sizing Modal State
+  const [sizeModalOpen, setSizeModalOpen] = useState(false);
+  const [customWidth, setCustomWidth] = useState("");
+  const [customHeight, setCustomHeight] = useState("");
+  const [customUnit, setCustomUnit] = useState<"px" | "inch" | "cm" | "m">("px");
+  const [pendingFolderId, setPendingFolderId] = useState<string | null>(null);
 
   // Viewport Scaling State
   const workspaceRef = useRef<HTMLDivElement>(null);
@@ -644,10 +653,10 @@ export default function ProjectEditorPage() {
       let baseHeight = node.frame === "mobile" ? 812 : 900;
 
       if (node.width) {
-        baseWidth = node.width;
+        baseWidth = convertToPx(node.width, node.unit);
       }
       if (node.height) {
-        baseHeight = node.height;
+        baseHeight = convertToPx(node.height, node.unit);
       }
 
       if (!node.width || !node.height) {
@@ -719,6 +728,31 @@ export default function ProjectEditorPage() {
     const folder = findNodeById(tree, folderId);
     if (!folder || folder.kind !== "folder") return;
 
+    const needsPrompt = (
+      projectKind === "product design - packaging" ||
+      projectKind === "logo design" ||
+      projectKind === "social media design"
+    );
+
+    if (needsPrompt) {
+      let defaultW = "1080";
+      let defaultH = "1080";
+      let defaultUnit: "px" | "inch" | "cm" | "m" = "px";
+      if (projectKind === "product design - packaging") {
+        defaultW = "1200";
+        defaultH = "1200";
+      } else if (projectKind === "logo design") {
+        defaultW = "800";
+        defaultH = "800";
+      }
+      setCustomWidth(defaultW);
+      setCustomHeight(defaultH);
+      setCustomUnit(defaultUnit);
+      setPendingFolderId(folderId);
+      setSizeModalOpen(true);
+      return;
+    }
+
     const frame = defaultFrameForFolder(folderId, folder.name);
     const screenCount = folder.children.filter((c) => c.kind === "screen").length + 1;
 
@@ -728,7 +762,7 @@ export default function ProjectEditorPage() {
         name = frame === "mobile" ? `Mobile ${screenCount}` : `Desktop ${screenCount}`;
       } else if (projectKind === "practice") {
         name = `Practice ${screenCount}`;
-      } else if (projectKind === "logo design") {
+      } else if ((projectKind as string) === "logo design") {
         name = `Artboard ${screenCount}`;
       }
     }
@@ -759,6 +793,34 @@ export default function ProjectEditorPage() {
 
   function handleHeaderPlus(isFromChat: boolean | any = false): string {
     const isChat = isFromChat === true;
+
+    const needsPrompt = (
+      !isChat && (
+        projectKind === "product design - packaging" ||
+        projectKind === "logo design" ||
+        projectKind === "social media design"
+      )
+    );
+
+    if (needsPrompt) {
+      let defaultW = "1080";
+      let defaultH = "1080";
+      let defaultUnit: "px" | "inch" | "cm" | "m" = "px";
+      if (projectKind === "product design - packaging") {
+        defaultW = "1200";
+        defaultH = "1200";
+      } else if (projectKind === "logo design") {
+        defaultW = "800";
+        defaultH = "800";
+      }
+      setCustomWidth(defaultW);
+      setCustomHeight(defaultH);
+      setCustomUnit(defaultUnit);
+      setPendingFolderId(null);
+      setSizeModalOpen(true);
+      return "";
+    }
+
     if (projectKind === "social media design" && !isChat) {
       setActiveId("");
       toast.info("Select a preset to add a new screen.");
@@ -800,6 +862,42 @@ export default function ProjectEditorPage() {
     if (firstFolder) { handleFolderAdd(firstFolder.id); return ""; }
     toast.error("No folder to add to.");
     return "";
+  }
+
+  function handleCreateCustomArtboard() {
+    const w = parseFloat(customWidth);
+    const h = parseFloat(customHeight);
+    if (isNaN(w) || w <= 0 || isNaN(h) || h <= 0) {
+      toast.error("Please enter valid width and height values.");
+      return;
+    }
+
+    const newId = crypto.randomUUID();
+    const isSocial = projectKind === "social media design";
+    const prefix = projectKind === "logo design" ? "Artboard" : "Asset";
+    const name = `${prefix} ${tree.length + 1}`;
+    const child: EditorTreeNode = {
+      id: newId,
+      kind: "screen",
+      name,
+      frame: "desktop",
+      width: w,
+      height: h,
+      unit: customUnit,
+      sections: [{ id: crypto.randomUUID(), name: isSocial ? "Main Panel" : "First Section" }],
+      expansionDirection: "vertical",
+    };
+
+    if (pendingFolderId) {
+      setTree((prev) => addChildToFolder(prev, pendingFolderId, child));
+      setOpenFolders((p) => ({ ...p, [pendingFolderId]: true }));
+    } else {
+      setTree((prev) => [...prev, child]);
+    }
+
+    setActiveId(newId);
+    setSizeModalOpen(false);
+    toast.success(`Custom artboard (${w}x${h} ${customUnit}) created.`);
   }
 
   function handleCreateSocialPreset(name: string, platform: string, width: number, height: number) {
@@ -1099,18 +1197,37 @@ export default function ProjectEditorPage() {
               className="group flex flex-col items-start gap-4 text-left transition-all hover:scale-[1.02]"
             >
               <div className="relative w-full aspect-[4/3] rounded-3xl border border-foreground/10 bg-white/5 backdrop-blur-md overflow-hidden flex items-center justify-center p-8 group-hover:border-[#eca8d6]/40 group-hover:bg-[#eca8d6]/5">
-                <div
-                  className="rounded-lg shadow-2xl bg-white dark:bg-zinc-200 border border-foreground/5 pointer-events-none overflow-hidden flex flex-col gap-[2px] p-[2px]"
-                  style={{ width: s.frame === "mobile" ? "32%" : "85%", aspectRatio: s.frame === "mobile" ? 375 / 812 : 16 / 9 }}
-                >
-                  {(s.sections ?? [{ id: '1' }]).map((_, i) => (
-                    <div key={i} className="flex-1 bg-zinc-100 dark:bg-zinc-300 rounded-[2px] relative">
-                      <div className="absolute inset-0 flex items-center justify-center opacity-10">
-                        <Layout className="size-4" />
-                      </div>
+                {(() => {
+                  let thumbAspectRatio = s.frame === "mobile" ? 375 / 812 : 16 / 9;
+                  if (s.width && s.height) {
+                    thumbAspectRatio = s.width / s.height;
+                  } else {
+                    if (projectKind === "logo design") { thumbAspectRatio = 1; }
+                    if (projectKind === "ui/ux design" || projectKind === "product design" || projectKind === "product design - desktop") { thumbAspectRatio = 16 / 9; }
+                    if (projectKind === "product design - app") { thumbAspectRatio = 375 / 812; }
+                    if (projectKind === "product design - packaging") { thumbAspectRatio = 1; }
+                    if ((projectKind === "campaign design" || projectKind === "social media design") && s.formatLabel) {
+                      const res = (RESOLUTIONS.CAMPAIGN as any)[s.formatLabel];
+                      if (res) { thumbAspectRatio = res.w / res.h; }
+                    } else if (projectKind === "social media design") {
+                      thumbAspectRatio = 1;
+                    }
+                  }
+                  return (
+                    <div
+                      className="rounded-lg shadow-2xl bg-white dark:bg-zinc-200 border border-foreground/5 pointer-events-none overflow-hidden flex flex-col gap-[2px] p-[2px]"
+                      style={{ width: thumbAspectRatio < 1 ? "35%" : "85%", aspectRatio: thumbAspectRatio }}
+                    >
+                      {(s.sections ?? [{ id: '1' }]).map((_, i) => (
+                        <div key={i} className="flex-1 bg-zinc-100 dark:bg-zinc-300 rounded-[2px] relative">
+                          <div className="absolute inset-0 flex items-center justify-center opacity-10">
+                            <Layout className="size-4" />
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  );
+                })()}
                 <div className="absolute inset-0 bg-gradient-to-t from-background/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-4">
                   <span className="text-[0.6rem] font-bold text-white uppercase tracking-wider">Open Editor</span>
                 </div>
@@ -1121,7 +1238,7 @@ export default function ProjectEditorPage() {
                   <div className="text-[0.55rem] font-mono text-muted-foreground/30">#{idx + 1}</div>
                 </div>
                 <div className="text-[0.6rem] font-mono text-muted-foreground/40 uppercase mt-1 tracking-tighter">
-                  {s.frame === "mobile" ? "Mobile Viewport" : "Desktop Viewport"}
+                  {s.width && s.height ? `${s.width} × ${s.height} ${s.unit || 'px'}` : (s.frame === "mobile" ? "Mobile Viewport" : "Desktop Viewport")}
                 </div>
               </div>
             </button>
@@ -1229,7 +1346,7 @@ export default function ProjectEditorPage() {
       let width = screen.frame === "mobile" ? 375 : 1440;
       if (screen.width && screen.height) {
         aspectRatio = screen.width / screen.height;
-        width = screen.width;
+        width = convertToPx(screen.width, screen.unit);
       } else {
         if (projectKind === "logo design") { aspectRatio = 1; width = 800; }
         if (projectKind === "ui/ux design" || projectKind === "product design" || projectKind === "product design - desktop") { aspectRatio = 16 / 9; width = 1920; }
@@ -1533,6 +1650,114 @@ export default function ProjectEditorPage() {
           projectName={projectMeta.name}
         />
       ) : null}
+
+      <Dialog open={sizeModalOpen} onOpenChange={setSizeModalOpen}>
+        <DialogContent className="sm:max-w-[400px] p-0 overflow-hidden border-white/10 bg-black/80 backdrop-blur-2xl rounded-3xl text-white">
+          <div className="p-6">
+            <DialogHeader className="space-y-2">
+              <DialogTitle className="font-display text-xl tracking-tight text-white flex items-center gap-2">
+                <span className="size-6 rounded-full bg-[#eca8d6]/10 flex items-center justify-center text-[#eca8d6]">
+                  <Plus className="size-4" />
+                </span>
+                Artboard Dimensions
+              </DialogTitle>
+              <DialogDescription className="text-xs text-zinc-400">
+                Specify the size for your new layout. Artboard auto-scales to fit your workspace.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="mt-6 space-y-4">
+              {/* Unit Selector */}
+              <div className="space-y-2">
+                <label className="text-[0.7rem] font-bold text-zinc-400 uppercase tracking-wider">Unit</label>
+                <div className="grid grid-cols-4 gap-1 p-1 rounded-xl bg-zinc-900/50 border border-white/5">
+                  {(["px", "inch", "cm", "m"] as const).map((u) => (
+                    <button
+                      key={u}
+                      type="button"
+                      onClick={() => setCustomUnit(u)}
+                      className={cn(
+                        "py-1.5 text-xs font-bold uppercase rounded-lg transition-all",
+                        customUnit === u
+                          ? "bg-[#eca8d6] text-black shadow-sm"
+                          : "text-zinc-400 hover:text-white hover:bg-white/5"
+                      )}
+                    >
+                      {u === "inch" ? "in" : u}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Width & Height Fields */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-[0.7rem] font-bold text-zinc-400 uppercase tracking-wider">Width</label>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      step="any"
+                      min="0.1"
+                      placeholder="Width"
+                      value={customWidth}
+                      onChange={(e) => setCustomWidth(e.target.value)}
+                      className="w-full h-10 px-3 rounded-xl border border-white/10 bg-zinc-950/50 text-white placeholder-zinc-600 focus:outline-none focus:border-[#eca8d6]/50 focus:ring-1 focus:ring-[#eca8d6]/50 text-sm font-mono"
+                    />
+                    <span className="absolute right-3 top-2.5 text-[0.65rem] font-bold text-zinc-500 uppercase">
+                      {customUnit === "inch" ? "in" : customUnit}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[0.7rem] font-bold text-zinc-400 uppercase tracking-wider">Height</label>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      step="any"
+                      min="0.1"
+                      placeholder="Height"
+                      value={customHeight}
+                      onChange={(e) => setCustomHeight(e.target.value)}
+                      className="w-full h-10 px-3 rounded-xl border border-white/10 bg-zinc-950/50 text-white placeholder-zinc-600 focus:outline-none focus:border-[#eca8d6]/50 focus:ring-1 focus:ring-[#eca8d6]/50 text-sm font-mono"
+                    />
+                    <span className="absolute right-3 top-2.5 text-[0.65rem] font-bold text-zinc-500 uppercase">
+                      {customUnit === "inch" ? "in" : customUnit}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Dynamic calculation preview */}
+              {customWidth && customHeight && !isNaN(parseFloat(customWidth)) && !isNaN(parseFloat(customHeight)) && (
+                <div className="rounded-xl bg-white/[0.02] border border-white/5 px-3 py-2 flex items-center justify-between text-[0.65rem] text-zinc-500 font-mono">
+                  <span>Pixel Equivalence:</span>
+                  <span className="text-zinc-300">
+                    {Math.round(convertToPx(parseFloat(customWidth), customUnit))} × {Math.round(convertToPx(parseFloat(customHeight), customUnit))} px
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-8 flex gap-3">
+              <Button
+                variant="outline"
+                onClick={() => setSizeModalOpen(false)}
+                className="h-10 rounded-full border border-white/10 bg-transparent text-white hover:bg-white/5 hover:text-white flex-1 text-xs font-bold uppercase tracking-wider"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleCreateCustomArtboard}
+                disabled={!customWidth || !customHeight || isNaN(parseFloat(customWidth)) || isNaN(parseFloat(customHeight))}
+                className="h-10 rounded-full bg-[#eca8d6] text-black hover:bg-[#eca8d6]/90 flex-1 text-xs font-bold uppercase tracking-wider shadow-sm shadow-[#eca8d6]/20"
+              >
+                Create
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

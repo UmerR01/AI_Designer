@@ -71,14 +71,18 @@ export function LoginFormView() {
 
           setIsSubmitting(true);
           try {
-            await postJson<{ user: any }>("/api/auth/login", {
+            const res = await postJson<{ user: { id: string; email: string; is_support_agent?: boolean } }>("/api/auth/login", {
               email: emailInput,
               password: passwordInput,
               remember,
               recaptchaToken: turnstileToken, // API uses recaptchaToken variable name still
             });
             toast.success("Welcome back.");
-            window.location.href = "/dashboard";
+            if (res?.user?.is_support_agent) {
+              window.location.href = "/support";
+            } else {
+              window.location.href = "/dashboard";
+            }
           } catch (err: any) {
             const msg = String(err?.detail ?? err?.message ?? "Sign in failed.");
             toast.error(msg);

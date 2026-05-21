@@ -19,7 +19,7 @@ async function loadProjectAssets(projectId: string) {
     order by created_at desc
     limit 200
   `;
-  return rows.map((r) => ({
+  return rows.map((r: any) => ({
     id: r.id,
     page_name: r.page_name ?? undefined,
     filename: r.filename,
