@@ -8,7 +8,7 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { getJson, postJson } from "@/lib/auth-api";
 import { Button } from "@/components/ui/button";
-import { getSharedSupportAudioCtx } from "@/components/support/audio-initializer";
+import { getSharedSupportAudioCtx, generateDualToneWavUri } from "@/components/support/audio-initializer";
 
 const LAUNCHER_SRC = "/images/chat-support.png";
 
@@ -68,29 +68,82 @@ export function FloatingChatSupport() {
   );
 
   const playRingtone = useCallback(async () => {
-    const ctx = getSharedSupportAudioCtx();
-    if (!ctx) return;
     try {
-      if (ctx.state === "suspended") await ctx.resume();
-      const playRing = (startTime: number) => {
-        [440, 480].forEach(freq => {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = "sine";
-          osc.frequency.setValueAtTime(freq, startTime);
-          gain.connect(ctx.destination);
-          osc.connect(gain);
-          gain.gain.setValueAtTime(0, startTime);
-          gain.gain.linearRampToValueAtTime(0.5, startTime + 0.05);
-          gain.gain.linearRampToValueAtTime(0.5, startTime + 0.45);
-          gain.gain.linearRampToValueAtTime(0, startTime + 0.5);
-          osc.start(startTime);
-          osc.stop(startTime + 0.5);
+      const wavUri = generateDualToneWavUri(440, 480, 0.5);
+      let count = 0;
+
+      const playWebAudioFallback = () => {
+        let ctx = getSharedSupportAudioCtx();
+        if (!ctx && typeof window !== "undefined") {
+          try {
+            ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+            (window as any).__designerSupportAudioCtx = ctx;
+          } catch (e) {
+            console.error("Failed to fallback initialize AudioContext in playRingtone", e);
+          }
+        }
+        if (!ctx) return;
+        try {
+          if (ctx.state === "suspended") {
+            ctx.resume().catch(() => {});
+          }
+          const playRing = (startTime: number) => {
+            [440, 480].forEach(freq => {
+              const osc = ctx!.createOscillator();
+              const gain = ctx!.createGain();
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(freq, startTime);
+              gain.connect(ctx!.destination);
+              osc.connect(gain);
+              gain.gain.setValueAtTime(0, startTime);
+              gain.gain.linearRampToValueAtTime(0.5, startTime + 0.05);
+              gain.gain.linearRampToValueAtTime(0.5, startTime + 0.45);
+              gain.gain.linearRampToValueAtTime(0, startTime + 0.5);
+              osc.start(startTime);
+              osc.stop(startTime + 0.5);
+            });
+          };
+          const now = ctx.currentTime;
+          for (let i = 0; i < 4; i++) playRing(now + (i * 0.75));
+        } catch (e) {
+          console.error("Web Audio fallback failed", e);
+        }
+      };
+
+      const playNext = () => {
+        if (count >= 4) return;
+        const audio = new Audio(wavUri);
+        audio.volume = 0.5;
+        audio.play().then(() => {
+          count++;
+          if (count < 4) {
+            setTimeout(playNext, 250); // 0.5s duration + 0.25s silence = 0.75s start interval
+          }
+        }).catch((err) => {
+          console.warn("HTML5 Audio failed, falling back to Web Audio API", err);
+          playWebAudioFallback();
         });
       };
-      const now = ctx.currentTime;
-      for (let i = 0; i < 4; i++) playRing(now + (i * 0.75));
-    } catch { /* ignore */ }
+
+      playNext();
+    } catch (e) {
+      console.error("Failed to play ringtone", e);
+    }
+  }, []);
+
+  // Fetch existing conversation ID on mount if one exists
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await getJson<{ conversations: { id: string; status: string }[] }>("/api/support/conversations/me");
+        const active = res.conversations?.find(c => c.status === "open" || c.status === "pending") || res.conversations?.[0];
+        if (active) {
+          setConversationId(active.id);
+        }
+      } catch {
+        // Not logged in or support unavailable, ignore
+      }
+    })();
   }, []);
 
   // Ensure a conversation exists when the panel opens.
@@ -107,29 +160,79 @@ export function FloatingChatSupport() {
     })();
   }, [open, loadMessages]);
 
+  // Keep references to prevent EventSource reconnects on every UI/state change
+  const openRef = useRef(open);
+  useEffect(() => {
+    openRef.current = open;
+  }, [open]);
+
+  const loadMessagesRef = useRef(loadMessages);
+  useEffect(() => {
+    loadMessagesRef.current = loadMessages;
+  }, [loadMessages]);
+
+  const playRingtoneRef = useRef(playRingtone);
+  useEffect(() => {
+    playRingtoneRef.current = playRingtone;
+  }, [playRingtone]);
+
+  const conversationIdRef = useRef(conversationId);
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+  }, [conversationId]);
+
   // Real-time updates via SSE
   useEffect(() => {
-    if (!open || !conversationId) return;
     const es = new EventSource("/api/support/realtime");
     es.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);
-        if (data?.type === "message.created" && data.conversationId === conversationId) {
-          loadMessages(conversationId);
-          if (data.senderType === 'agent') {
-            playRingtone();
+        const currentConvoId = conversationIdRef.current;
+
+        if (data?.type === "message.created") {
+          if (!currentConvoId || data.conversationId === currentConvoId) {
+            if (!currentConvoId) {
+              setConversationId(data.conversationId);
+            }
+            if (openRef.current) {
+              loadMessagesRef.current(data.conversationId);
+            }
+            if (data.senderType === "agent") {
+              if (!openRef.current) {
+                toast("New support message", {
+                  description: data.body || "Click to open chat",
+                  icon: "💬",
+                  action: {
+                    label: "Open Chat",
+                    onClick: () => setOpen(true),
+                  },
+                });
+              }
+            }
           }
         }
-        if (data?.type === "call.ring" && data.conversationId === conversationId) {
-          playRingtone();
-          toast("Support is calling you...", { icon: "🔔" });
+        if (data?.type === "call.ring") {
+          if (!currentConvoId || data.conversationId === currentConvoId) {
+            if (!currentConvoId) {
+              setConversationId(data.conversationId);
+            }
+            playRingtoneRef.current();
+            toast("Support is calling you...", {
+              description: "Click to open chat",
+              icon: "🔔",
+              action: {
+                label: "Open Chat",
+                onClick: () => setOpen(true),
+              },
+            });
+          }
         }
       } catch {
         // ignore
       }
     };
     return () => es.close();
-  }, [open, conversationId, loadMessages]);
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -254,7 +357,7 @@ export function FloatingChatSupport() {
           </div>
 
           {/* Messages */}
-          <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
+          <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3 thin-black-scrollbar">
             {lines.map((m) => (
               <div
                 key={m.id}

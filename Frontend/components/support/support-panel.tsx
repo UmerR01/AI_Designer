@@ -6,7 +6,7 @@ import { toast } from "sonner";
 
 import { cn } from "@/lib/utils";
 import { getJson, getMeCached, postJson } from "@/lib/auth-api";
-import type { SupportInboxConversation, SupportMessage, SupportUserContext } from "@/lib/support/types";
+import type { SupportInboxConversation, SupportMessage, SupportUserContext } from "../../lib/support/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
@@ -20,7 +20,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { getSharedSupportAudioCtx } from "@/components/support/audio-initializer";
+import { getSharedSupportAudioCtx, generateDualToneWavUri } from "@/components/support/audio-initializer";
 
 
 type Me = { user: { id: string; email: string; first_name: string; last_name: string; is_support_agent?: boolean } | null };
@@ -133,41 +133,64 @@ export function SupportPanel() {
   }, [soundEnabled, volume, dndEnabled]);
 
   async function playRingtone() {
-    const ctx = getSharedSupportAudioCtx();
-    if (!ctx) {
-      console.warn("Audio context not initialized. Interaction required.");
-      return;
-    }
-    
     try {
-      if (ctx.state === "suspended") await ctx.resume();
-      
-      const playRing = (startTime: number) => {
-        // High frequency dual ring
-        [440, 480].forEach(freq => {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          
-          osc.type = "sine";
-          osc.frequency.setValueAtTime(freq, startTime);
-          
-          gain.connect(ctx.destination);
-          osc.connect(gain);
-          
-          gain.gain.setValueAtTime(0, startTime);
-          gain.gain.linearRampToValueAtTime(0.5, startTime + 0.05);
-          gain.gain.linearRampToValueAtTime(0.5, startTime + 0.45);
-          gain.gain.linearRampToValueAtTime(0, startTime + 0.5);
-          
-          osc.start(startTime);
-          osc.stop(startTime + 0.5);
+      const wavUri = generateDualToneWavUri(440, 480, 0.5);
+      let count = 0;
+
+      const playWebAudioFallback = () => {
+        let ctx = getSharedSupportAudioCtx();
+        if (!ctx && typeof window !== "undefined") {
+          try {
+            ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+            (window as any).__designerSupportAudioCtx = ctx;
+          } catch (e) {
+            console.error("Failed to fallback initialize AudioContext in playRingtone", e);
+          }
+        }
+        if (!ctx) return;
+        try {
+          if (ctx.state === "suspended") {
+            ctx.resume().catch(() => {});
+          }
+          const playRing = (startTime: number) => {
+            [440, 480].forEach(freq => {
+              const osc = ctx!.createOscillator();
+              const gain = ctx!.createGain();
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(freq, startTime);
+              gain.connect(ctx!.destination);
+              osc.connect(gain);
+              gain.gain.setValueAtTime(0, startTime);
+              gain.gain.linearRampToValueAtTime(0.5 * volume, startTime + 0.05);
+              gain.gain.linearRampToValueAtTime(0.5 * volume, startTime + 0.45);
+              gain.gain.linearRampToValueAtTime(0, startTime + 0.5);
+              osc.start(startTime);
+              osc.stop(startTime + 0.5);
+            });
+          };
+          const now = ctx.currentTime;
+          for (let i = 0; i < 4; i++) playRing(now + (i * 0.75));
+        } catch (e) {
+          console.error("Web Audio fallback failed", e);
+        }
+      };
+
+      const playNext = () => {
+        if (count >= 4) return;
+        const audio = new Audio(wavUri);
+        audio.volume = 0.5 * volume;
+        audio.play().then(() => {
+          count++;
+          if (count < 4) {
+            setTimeout(playNext, 250); // 0.5s duration + 0.25s silence = 0.75s start interval
+          }
+        }).catch((err) => {
+          console.warn("HTML5 Audio failed, falling back to Web Audio API", err);
+          playWebAudioFallback();
         });
       };
 
-      const now = ctx.currentTime;
-      for (let i = 0; i < 4; i++) {
-        playRing(now + (i * 0.75));
-      }
+      playNext();
     } catch (e) {
       console.error("Ringtone playback failed:", e);
     }
@@ -377,16 +400,6 @@ export function SupportPanel() {
       {/* Small Pink Header */}
       <div className="h-10 px-4 flex items-center justify-between shrink-0 border-b border-white/5 bg-black/20 backdrop-blur-md z-10">
         <div className="text-[10px] font-mono uppercase tracking-[0.3em] text-[#eca8d6] font-bold">Support Console</div>
-        <div className="flex items-center gap-3">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2.5 rounded-md border border-white/5 bg-white/[0.02] text-[9px] font-mono uppercase tracking-wider text-white/40 hover:text-white hover:bg-white/10"
-            onClick={playRingtone}
-          >
-            Test Console Notifications
-          </Button>
-        </div>
       </div>
 
       <div className="flex-1 flex overflow-hidden border-t border-white/10 z-10">
