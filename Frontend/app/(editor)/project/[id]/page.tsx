@@ -24,6 +24,7 @@ import {
   MoreHorizontal,
   Download,
   Share,
+  LayoutGrid,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -45,7 +46,10 @@ import {
   removeNodeById,
   addSectionToScreen,
   renameNodeById,
+  duplicateNodeById,
+  convertToPx,
 } from "@/lib/editor-project";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -69,6 +73,19 @@ import {
 import { ShareDialog } from "@/components/share/share-dialog";
 
 const STORAGE_PREFIX = "designer.project.";
+
+const SOCIAL_PRESETS = [
+  { id: 1, name: "Instagram Post (Square)", platform: "Instagram", size: "1080 × 1080 px", w: 1080, h: 1080 },
+  { id: 2, name: "Instagram Portrait Post", platform: "Instagram", size: "1080 × 1350 px", w: 1080, h: 1350 },
+  { id: 3, name: "Instagram Story", platform: "Instagram", size: "1080 × 1920 px", w: 1080, h: 1920 },
+  { id: 4, name: "Facebook Post", platform: "Facebook", size: "1200 × 630 px", w: 1200, h: 630 },
+  { id: 5, name: "Facebook Cover Banner", platform: "Facebook", size: "1640 × 624 px", w: 1640, h: 624 },
+  { id: 6, name: "LinkedIn Post", platform: "LinkedIn", size: "1200 × 1200 px", w: 1200, h: 1200 },
+  { id: 7, name: "LinkedIn Banner", platform: "LinkedIn", size: "1584 × 396 px", w: 1584, h: 396 },
+  { id: 8, name: "TikTok / Reel Canvas", platform: "TikTok / Reels", size: "1080 × 1920 px", w: 1080, h: 1920 },
+  { id: 9, name: "X (Twitter) Header", platform: "X / Twitter", size: "1500 × 500 px", w: 1500, h: 500 },
+  { id: 10, name: "YouTube Thumbnail", platform: "YouTube", size: "1280 × 720 px", w: 1280, h: 720 },
+];
 
 type MeResponse = {
   user: {
@@ -129,29 +146,109 @@ function classifyGeneratedImage(img: GeneratedUiImage): "logo" | "mobile" | "pos
   return "generic";
 }
 
-function pickImageForScreen(
-  screen: Extract<EditorTreeNode, { kind: "screen" }>,
+function isImageOwnedByOtherScreen(
+  img: GeneratedUiImage,
+  currentScreenId: string,
+  tree: EditorTreeNode[],
+): boolean {
+  const name = img.page_name || "";
+  const match = name.match(/\[ScreenID:([^\]]+)\]/i);
+  if (!match) return false;
+  const ownerId = match[1];
+  if (ownerId === currentScreenId) return false;
+
+  const ownerScreen = findNodeById(tree, ownerId);
+  if (!ownerScreen || ownerScreen.kind !== "screen") return false;
+
+  const cleanName = name.replace(/\[ScreenID:[^\]]+\]/gi, "").trim().toLowerCase();
+  if (!cleanName || cleanName === "style guide" || cleanName === "brand logo" || cleanName === "illustration" || cleanName === "social post") {
+    return true;
+  }
+
+  const ownerName = (ownerScreen.name || "").toLowerCase();
+  const isUntitled = ownerName === "untitled" || ownerName.startsWith("untitled ");
+  if (!isUntitled && (cleanName.includes(ownerName) || ownerName.includes(cleanName))) {
+    return true;
+  }
+
+  return false;
+}
+
+function pickImageForSection(
+  screen: any,
+  sec: { id: string; name: string },
+  idx: number,
   images: GeneratedUiImage[],
+  tree: EditorTreeNode[],
 ): GeneratedUiImage | null {
   if (!images.length) return null;
   const sorted = images
     .slice()
     .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
 
+  // 1. Match by explicit Section ID tag in page_name
+  const sectionIdTag = `[SectionID:${sec.id}]`;
+  const directBySectionId = sorted.find((img) => {
+    const name = img.page_name || "";
+    return name.includes(sectionIdTag) || name === sec.id;
+  });
+  if (directBySectionId) return directBySectionId;
+
+  // 2. Match by explicit Screen ID tag in page_name
+  const screenIdTag = `[ScreenID:${screen.id}]`;
+  const directByScreenId = sorted.find((img) => {
+    const name = (img.page_name || "").toLowerCase();
+    const hasTag = name.includes(screenIdTag.toLowerCase()) || name === screen.id.toLowerCase();
+    if (!hasTag) return false;
+
+    // Verify it belongs to this screen name if it has a clean name suffix
+    const cleanName = name.replace(screenIdTag.toLowerCase(), "").trim();
+    if (cleanName && cleanName !== "style guide" && cleanName !== "brand logo" && cleanName !== "illustration" && cleanName !== "social post") {
+      const screenName = (screen.name || "").toLowerCase();
+      const isUntitled = screenName === "untitled" || screenName.startsWith("untitled ");
+      if (!isUntitled && !cleanName.includes(screenName) && !screenName.includes(cleanName)) {
+        return false;
+      }
+    }
+    return true;
+  });
+
+  // 3. Fall back to name or format label match (excluding default "untitled" names)
   const screenName = (screen.name || "").toLowerCase();
   const format = (screen.formatLabel || "").toLowerCase();
-  const direct = sorted.find((img) => {
-    const hay = `${img.page_name ?? ""} ${img.filename ?? ""}`.toLowerCase();
-    return (screenName && hay.includes(screenName)) || (format && hay.includes(format));
-  });
-  if (direct) return direct;
+  const isUntitled = screenName === "untitled" || screenName.startsWith("untitled ");
 
-  const byFrame = sorted.find((img) => {
-    const k = classifyGeneratedImage(img);
-    if (screen.frame === "mobile") return k === "mobile";
-    return k === "web" || k === "poster" || k === "generic";
+  const directByNameOrFormat = sorted.find((img) => {
+    // Skip if owned by another active screen in the tree
+    if (isImageOwnedByOtherScreen(img, screen.id, tree)) {
+      return false;
+    }
+
+    const hay = `${img.page_name ?? ""} ${img.filename ?? ""}`.toLowerCase();
+    const nameMatch = !isUntitled && screenName && hay.includes(screenName);
+    const formatMatch = format && hay.includes(format);
+    return nameMatch || formatMatch;
   });
-  return byFrame ?? sorted[0];
+
+  // Resolve priority:
+  // If we have an image matching the screen ID:
+  // By default, the screen-level image belongs to the first section (idx === 0).
+  // Subsequent sections (idx > 0) should not inherit the screen image.
+  if (directByScreenId) {
+    if (idx === 0) {
+      return directByScreenId;
+    }
+  }
+
+  // If there is an image matching by name/format:
+  // Again, only apply it to the first section (idx === 0) as a fallback.
+  if (directByNameOrFormat) {
+    if (idx === 0) {
+      return directByNameOrFormat;
+    }
+  }
+
+  return null;
 }
 
 function dedupeGeneratedImages(images: GeneratedUiImage[]): GeneratedUiImage[] {
@@ -195,6 +292,13 @@ export default function ProjectEditorPage() {
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
   const [hydrated, setHydrated] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+
+  // Customizable Artboard Sizing Modal State
+  const [sizeModalOpen, setSizeModalOpen] = useState(false);
+  const [customWidth, setCustomWidth] = useState("");
+  const [customHeight, setCustomHeight] = useState("");
+  const [customUnit, setCustomUnit] = useState<"px" | "inch" | "cm" | "m">("px");
+  const [pendingFolderId, setPendingFolderId] = useState<string | null>(null);
 
   // Viewport Scaling State
   const workspaceRef = useRef<HTMLDivElement>(null);
@@ -283,13 +387,16 @@ export default function ProjectEditorPage() {
       if (parsedData) {
         let { tree, activeId, openFolders } = parsedData;
         // Previously we bootstrapped as ui/ux before API kind arrived; fix stale default trees for website projects.
-        if (kind === "website design" && isDefaultUiUxBootstrapTree(tree)) {
-          const boot = getEditorBootstrap("website design");
+        if (
+          (kind === "website design" || kind === "landing page" || kind === "multi-page website") &&
+          isDefaultUiUxBootstrapTree(tree)
+        ) {
+          const boot = getEditorBootstrap(kind);
           tree = boot.tree;
           activeId = boot.activeId;
           openFolders = boot.openFolders;
         }
-        if (kind === "practice") {
+        if (kind !== "campaign design") {
           const flattened = normalizePracticeTreeFlat(tree);
           tree = flattened;
           openFolders = {};
@@ -425,7 +532,11 @@ export default function ProjectEditorPage() {
   async function persistProjectData() {
     const storageKey = `${STORAGE_PREFIX}${projectId}`;
     const payload = buildPersistedEditorData();
-    localStorage.setItem(storageKey, JSON.stringify(payload));
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(payload));
+    } catch (e) {
+      console.warn("localStorage quota exceeded for project save", e);
+    }
     await putJson<{ ok: boolean }>(`/api/projects/${projectId}/data`, { data: payload });
   }
 
@@ -449,10 +560,14 @@ export default function ProjectEditorPage() {
   useEffect(() => {
     if (!hydrated || !projectId) return;
     const timeout = setTimeout(() => {
-      localStorage.setItem(
-        `draft.${STORAGE_PREFIX}${projectId}`,
-        JSON.stringify(buildPersistedEditorData()),
-      );
+      try {
+        localStorage.setItem(
+          `draft.${STORAGE_PREFIX}${projectId}`,
+          JSON.stringify(buildPersistedEditorData()),
+        );
+      } catch (e) {
+        console.warn("localStorage quota exceeded for draft save", e);
+      }
     }, 1000);
     return () => clearTimeout(timeout);
   }, [tree, activeId, openFolders, generatedUiImages, hydrated, projectId]);
@@ -537,14 +652,26 @@ export default function ProjectEditorPage() {
       let baseWidth = node.frame === "mobile" ? 375 : 1440;
       let baseHeight = node.frame === "mobile" ? 812 : 900;
 
-      if (projectKind === "logo design") { baseWidth = 1200; baseHeight = 900; }
-      if (projectKind === "ui/ux design") { baseWidth = 1920; baseHeight = 1080; }
+      if (node.width) {
+        baseWidth = convertToPx(node.width, node.unit);
+      }
+      if (node.height) {
+        baseHeight = convertToPx(node.height, node.unit);
+      }
 
+      if (!node.width || !node.height) {
+        if (projectKind === "logo design") { baseWidth = 800; baseHeight = 800; }
+        if (projectKind === "ui/ux design" || projectKind === "product design" || projectKind === "product design - desktop") { baseWidth = 1920; baseHeight = 1080; }
+        if (projectKind === "product design - packaging") { baseWidth = 1200; baseHeight = 1200; }
+        if (projectKind === "social media design") { baseWidth = 1080; baseHeight = 1080; }
+      }
+
+      const isWeb = projectKind === "website design" || projectKind === "landing page" || projectKind === "multi-page website";
       const sectionsCount = node.sections?.length || 1;
-      const totalWidth = node.frame === "mobile" && projectKind === "website design"
+      const totalWidth = node.frame === "mobile" && isWeb
         ? (baseWidth + 32) * sectionsCount
         : baseWidth;
-      const totalHeight = node.frame === "mobile" && projectKind === "website design"
+      const totalHeight = node.frame === "mobile" && isWeb
         ? baseHeight
         : (baseHeight + 48) * sectionsCount;
 
@@ -553,7 +680,7 @@ export default function ProjectEditorPage() {
 
       let finalScale;
       // For multi-section projects, we fix one dimension to prevent zooming out upon expansion
-      if (projectKind === "website design" || projectKind === "ui/ux design") {
+      if (isWeb || projectKind === "ui/ux design" || projectKind?.startsWith("product design")) {
         if (node.expansionDirection === "horizontal") {
           finalScale = Math.min(scaleY, 1.1); // Fit height, allow slight prominence
         } else {
@@ -601,16 +728,41 @@ export default function ProjectEditorPage() {
     const folder = findNodeById(tree, folderId);
     if (!folder || folder.kind !== "folder") return;
 
+    const needsPrompt = (
+      projectKind === "product design - packaging" ||
+      projectKind === "logo design" ||
+      projectKind === "social media design"
+    );
+
+    if (needsPrompt) {
+      let defaultW = "1080";
+      let defaultH = "1080";
+      let defaultUnit: "px" | "inch" | "cm" | "m" = "px";
+      if (projectKind === "product design - packaging") {
+        defaultW = "1200";
+        defaultH = "1200";
+      } else if (projectKind === "logo design") {
+        defaultW = "800";
+        defaultH = "800";
+      }
+      setCustomWidth(defaultW);
+      setCustomHeight(defaultH);
+      setCustomUnit(defaultUnit);
+      setPendingFolderId(folderId);
+      setSizeModalOpen(true);
+      return;
+    }
+
     const frame = defaultFrameForFolder(folderId, folder.name);
     const screenCount = folder.children.filter((c) => c.kind === "screen").length + 1;
 
     let name = customName ?? `Screen ${screenCount}`;
     if (!customName) {
-      if (projectKind === "website design") {
+      if (projectKind === "website design" || projectKind === "landing page" || projectKind === "multi-page website") {
         name = frame === "mobile" ? `Mobile ${screenCount}` : `Desktop ${screenCount}`;
       } else if (projectKind === "practice") {
         name = `Practice ${screenCount}`;
-      } else if (projectKind === "logo design") {
+      } else if ((projectKind as string) === "logo design") {
         name = `Artboard ${screenCount}`;
       }
     }
@@ -639,43 +791,144 @@ export default function ProjectEditorPage() {
     toast.info("Select a preset to add.");
   }
 
-  function handleHeaderPlus() {
-    if (projectKind === "practice") {
+  function handleHeaderPlus(isFromChat: boolean | any = false): string {
+    const isChat = isFromChat === true;
+
+    const needsPrompt = (
+      !isChat && (
+        projectKind === "product design - packaging" ||
+        projectKind === "logo design" ||
+        projectKind === "social media design"
+      )
+    );
+
+    if (needsPrompt) {
+      let defaultW = "1080";
+      let defaultH = "1080";
+      let defaultUnit: "px" | "inch" | "cm" | "m" = "px";
+      if (projectKind === "product design - packaging") {
+        defaultW = "1200";
+        defaultH = "1200";
+      } else if (projectKind === "logo design") {
+        defaultW = "800";
+        defaultH = "800";
+      }
+      setCustomWidth(defaultW);
+      setCustomHeight(defaultH);
+      setCustomUnit(defaultUnit);
+      setPendingFolderId(null);
+      setSizeModalOpen(true);
+      return "";
+    }
+
+    if (projectKind === "social media design" && !isChat) {
+      setActiveId("");
+      toast.info("Select a preset to add a new screen.");
+      return "";
+    }
+
+    if (projectKind !== "campaign design") {
       const newId = crypto.randomUUID();
+      const frame = projectKind === "product design - app" ? "mobile" : "desktop";
+      const isSocial = projectKind === "social media design";
       const child: EditorTreeNode = {
         id: newId,
         kind: "screen",
         name: "Untitled",
-        frame: "desktop",
-        sections: [{ id: crypto.randomUUID(), name: "First Section" }],
+        frame,
+        width: isSocial ? 1080 : undefined,
+        height: isSocial ? 1080 : undefined,
+        sections: [{ id: crypto.randomUUID(), name: isSocial ? "Main Panel" : "First Section" }],
         expansionDirection: "vertical",
       };
       setTree((prev) => [...prev, child]);
       setActiveId(newId);
       setRenamingId(newId);
       setRenameDraft("Untitled");
-      toast.success("Practice added.");
-      return;
+      toast.success(isSocial ? "Asset added." : "Screen added.");
+      return newId;
     }
 
     if (projectKind === "campaign design") {
       const folder = tree.find((n) => n.kind === "folder");
       if (folder) openCampaignPresetPicker(folder.id);
-      return;
+      return "";
     }
 
     const folderId = activeNode?.kind === "folder" ? activeNode.id : null;
-    if (folderId) { handleFolderAdd(folderId); return; }
+    if (folderId) { handleFolderAdd(folderId); return ""; }
 
     const firstFolder = tree.find((n) => n.kind === "folder");
-    if (firstFolder) { handleFolderAdd(firstFolder.id); return; }
+    if (firstFolder) { handleFolderAdd(firstFolder.id); return ""; }
     toast.error("No folder to add to.");
+    return "";
+  }
+
+  function handleCreateCustomArtboard() {
+    const w = parseFloat(customWidth);
+    const h = parseFloat(customHeight);
+    if (isNaN(w) || w <= 0 || isNaN(h) || h <= 0) {
+      toast.error("Please enter valid width and height values.");
+      return;
+    }
+
+    const newId = crypto.randomUUID();
+    const isSocial = projectKind === "social media design";
+    const prefix = projectKind === "logo design" ? "Artboard" : "Asset";
+    const name = `${prefix} ${tree.length + 1}`;
+    const child: EditorTreeNode = {
+      id: newId,
+      kind: "screen",
+      name,
+      frame: "desktop",
+      width: w,
+      height: h,
+      unit: customUnit,
+      sections: [{ id: crypto.randomUUID(), name: isSocial ? "Main Panel" : "First Section" }],
+      expansionDirection: "vertical",
+    };
+
+    if (pendingFolderId) {
+      setTree((prev) => addChildToFolder(prev, pendingFolderId, child));
+      setOpenFolders((p) => ({ ...p, [pendingFolderId]: true }));
+    } else {
+      setTree((prev) => [...prev, child]);
+    }
+
+    setActiveId(newId);
+    setSizeModalOpen(false);
+    toast.success(`Custom artboard (${w}x${h} ${customUnit}) created.`);
+  }
+
+  function handleCreateSocialPreset(name: string, platform: string, width: number, height: number) {
+    const newId = crypto.randomUUID();
+    const child: EditorTreeNode = {
+      id: newId,
+      kind: "screen",
+      name: "Untitled",
+      frame: "desktop",
+      formatLabel: `${platform} - ${name}`,
+      width,
+      height,
+      sections: [{ id: crypto.randomUUID(), name: "Main Panel" }],
+      expansionDirection: "vertical",
+    };
+    setTree((prev) => [...prev, child]);
+    setActiveId(newId);
+    setRenamingId(newId);
+    setRenameDraft("Untitled");
+    toast.success(`Preset "${name}" loaded.`);
   }
 
   function handleDeleteNode(id: string) {
     setTree((prev) => removeNodeById(prev, id));
     if (activeId === id) setActiveId("");
     toast.success("Item removed.");
+  }
+
+  function handleDuplicateNode(id: string) {
+    setTree((prev) => duplicateNodeById(prev, id));
+    toast.success("Item duplicated.");
   }
 
   function handleAddSection(screenId: string) {
@@ -713,18 +966,20 @@ export default function ProjectEditorPage() {
                 <span className="truncate font-medium">{n.name}</span>
               </button>
               <div className="flex items-center opacity-0 group-hover/item:opacity-100 transition-opacity">
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="size-7 rounded-lg"
-                  onClick={() =>
-                    projectKind === "campaign design"
-                      ? openCampaignPresetPicker(n.id)
-                      : handleFolderAdd(n.id)
-                  }
-                >
-                  <Plus className="size-3.5" />
-                </Button>
+                {projectKind !== "landing page" && projectKind !== "multi-page website" && projectKind !== "website design" && (
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="size-7 rounded-lg"
+                    onClick={() =>
+                      projectKind === "campaign design"
+                        ? openCampaignPresetPicker(n.id)
+                        : handleFolderAdd(n.id)
+                    }
+                  >
+                    <Plus className="size-3.5" />
+                  </Button>
+                )}
               </div>
             </div>
             {isOpen ? <div className="space-y-1">{renderTree(n.children, depth + 1)}</div> : null}
@@ -742,7 +997,6 @@ export default function ProjectEditorPage() {
             type="button"
             onClick={() => setActiveId(n.id)}
             onDoubleClick={() => {
-              if (projectKind !== "practice") return;
               setRenamingId(n.id);
               setRenameDraft(n.name);
             }}
@@ -754,7 +1008,7 @@ export default function ProjectEditorPage() {
           >
             <span className="inline-block w-3.5 shrink-0" />
             <Icon className={cn("size-3.5 shrink-0", active ? "text-[#eca8d6]" : "text-muted-foreground")} />
-            {projectKind === "practice" && renamingId === n.id ? (
+            {renamingId === n.id ? (
               <input
                 value={renameDraft}
                 autoFocus
@@ -780,14 +1034,31 @@ export default function ProjectEditorPage() {
               <span className="truncate">{n.name}</span>
             )}
           </button>
-          <Button
-            size="icon"
-            variant="ghost"
-            className="size-7 rounded-lg opacity-0 group-hover/item:opacity-100 hover:text-destructive transition-all"
-            onClick={() => handleDeleteNode(n.id)}
-          >
-            <Trash2 className="size-3.5" />
-          </Button>
+          <div className="opacity-0 group-hover/item:opacity-100 transition-opacity">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button size="icon" variant="ghost" className="size-7 rounded-lg">
+                  <MoreHorizontal className="size-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-36">
+                <DropdownMenuItem
+                  onClick={() => {
+                    setRenamingId(n.id);
+                    setRenameDraft(n.name);
+                  }}
+                >
+                  <Type className="mr-2 size-3.5" /> Rename
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => handleDuplicateNode(n.id)}>
+                  <Plus className="mr-2 size-3.5" /> Duplicate
+                </DropdownMenuItem>
+                <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => handleDeleteNode(n.id)}>
+                  <Trash2 className="mr-2 size-3.5" /> Delete
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
       );
     });
@@ -926,18 +1197,37 @@ export default function ProjectEditorPage() {
               className="group flex flex-col items-start gap-4 text-left transition-all hover:scale-[1.02]"
             >
               <div className="relative w-full aspect-[4/3] rounded-3xl border border-foreground/10 bg-white/5 backdrop-blur-md overflow-hidden flex items-center justify-center p-8 group-hover:border-[#eca8d6]/40 group-hover:bg-[#eca8d6]/5">
-                <div
-                  className="rounded-lg shadow-2xl bg-white dark:bg-zinc-200 border border-foreground/5 pointer-events-none overflow-hidden flex flex-col gap-[2px] p-[2px]"
-                  style={{ width: s.frame === "mobile" ? "32%" : "85%", aspectRatio: s.frame === "mobile" ? 375 / 812 : 16 / 9 }}
-                >
-                  {(s.sections ?? [{ id: '1' }]).map((_, i) => (
-                    <div key={i} className="flex-1 bg-zinc-100 dark:bg-zinc-300 rounded-[2px] relative">
-                      <div className="absolute inset-0 flex items-center justify-center opacity-10">
-                        <Layout className="size-4" />
-                      </div>
+                {(() => {
+                  let thumbAspectRatio = s.frame === "mobile" ? 375 / 812 : 16 / 9;
+                  if (s.width && s.height) {
+                    thumbAspectRatio = s.width / s.height;
+                  } else {
+                    if (projectKind === "logo design") { thumbAspectRatio = 1; }
+                    if (projectKind === "ui/ux design" || projectKind === "product design" || projectKind === "product design - desktop") { thumbAspectRatio = 16 / 9; }
+                    if (projectKind === "product design - app") { thumbAspectRatio = 375 / 812; }
+                    if (projectKind === "product design - packaging") { thumbAspectRatio = 1; }
+                    if ((projectKind === "campaign design" || projectKind === "social media design") && s.formatLabel) {
+                      const res = (RESOLUTIONS.CAMPAIGN as any)[s.formatLabel];
+                      if (res) { thumbAspectRatio = res.w / res.h; }
+                    } else if (projectKind === "social media design") {
+                      thumbAspectRatio = 1;
+                    }
+                  }
+                  return (
+                    <div
+                      className="rounded-lg shadow-2xl bg-white dark:bg-zinc-200 border border-foreground/5 pointer-events-none overflow-hidden flex flex-col gap-[2px] p-[2px]"
+                      style={{ width: thumbAspectRatio < 1 ? "35%" : "85%", aspectRatio: thumbAspectRatio }}
+                    >
+                      {(s.sections ?? [{ id: '1' }]).map((_, i) => (
+                        <div key={i} className="flex-1 bg-zinc-100 dark:bg-zinc-300 rounded-[2px] relative">
+                          <div className="absolute inset-0 flex items-center justify-center opacity-10">
+                            <Layout className="size-4" />
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  );
+                })()}
                 <div className="absolute inset-0 bg-gradient-to-t from-background/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-4">
                   <span className="text-[0.6rem] font-bold text-white uppercase tracking-wider">Open Editor</span>
                 </div>
@@ -948,7 +1238,7 @@ export default function ProjectEditorPage() {
                   <div className="text-[0.55rem] font-mono text-muted-foreground/30">#{idx + 1}</div>
                 </div>
                 <div className="text-[0.6rem] font-mono text-muted-foreground/40 uppercase mt-1 tracking-tighter">
-                  {s.frame === "mobile" ? "Mobile Viewport" : "Desktop Viewport"}
+                  {s.width && s.height ? `${s.width} × ${s.height} ${s.unit || 'px'}` : (s.frame === "mobile" ? "Mobile Viewport" : "Desktop Viewport")}
                 </div>
               </div>
             </button>
@@ -968,6 +1258,54 @@ export default function ProjectEditorPage() {
   const [canvasTheme, setCanvasTheme] = useState<"light" | "dark">("light");
 
   function renderEmptyWorkspace() {
+    if (projectKind === "social media design") {
+      return (
+        <div className="flex flex-col items-center justify-center min-h-full p-8 md:p-12 space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-5xl mx-auto">
+          <div className="text-center space-y-2">
+            <h3 className="font-display text-3xl font-bold tracking-tight text-white">
+              Social Media Presets
+            </h3>
+            <p className="text-[0.8rem] text-zinc-400 max-w-xl mx-auto">
+              Select any high-fidelity preset canvas to instantly bootstrap your custom asset in the project screens layout.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 w-full">
+            {SOCIAL_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                onClick={() => handleCreateSocialPreset(preset.name, preset.platform, preset.w, preset.h)}
+                className="group relative flex flex-col items-start justify-between p-5 rounded-2xl border border-white/5 bg-zinc-950/40 text-left hover:bg-zinc-900/60 hover:border-[#eca8d6]/30 hover:scale-[1.03] active:scale-[0.98] transition-all duration-300 shadow-lg shadow-black/25 overflow-hidden"
+              >
+                {/* Decorative Hover Gradient */}
+                <div className="absolute inset-0 bg-gradient-to-br from-[#eca8d6]/0 via-[#eca8d6]/0 to-[#eca8d6]/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
+                
+                <div className="space-y-4 z-10 w-full">
+                  <span className="inline-flex items-center rounded-full bg-white/5 group-hover:bg-[#eca8d6]/10 px-2 py-0.5 text-[0.65rem] font-medium text-zinc-400 group-hover:text-[#eca8d6] transition-colors">
+                    {preset.platform}
+                  </span>
+                  
+                  <div className="space-y-1">
+                    <h4 className="font-semibold text-[0.85rem] leading-tight text-white group-hover:text-[#eca8d6] transition-colors line-clamp-2">
+                      {preset.name}
+                    </h4>
+                    <p className="text-[0.7rem] text-zinc-500 font-mono">
+                      {preset.size}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-6 flex items-center justify-between w-full z-10 text-[0.7rem] font-semibold text-zinc-400 group-hover:text-white transition-colors">
+                  <span>Create Canvas</span>
+                  <Plus className="size-3.5 group-hover:rotate-90 transition-transform duration-300" />
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="flex flex-col items-center justify-center h-full text-center p-12 space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-1000">
         <div className="size-24 rounded-full border border-foreground/5 bg-foreground/[0.02] flex items-center justify-center">
@@ -1000,19 +1338,29 @@ export default function ProjectEditorPage() {
 
     if (activeNode.kind === "screen") {
       const screen = activeNode;
-      const selectedImage = pickImageForScreen(screen, generatedUiImages) ?? latestGeneratedUiImage;
       const sections = screen.sections ?? [{ id: "base", name: "Base" }];
-      const isMobileHorizontal = projectKind === "website design" && screen.frame === "mobile";
+      const isWeb = projectKind === "website design" || projectKind === "landing page" || projectKind === "multi-page website";
+      const isMobileHorizontal = isWeb && screen.frame === "mobile";
 
       let aspectRatio = 16 / 9;
       let width = screen.frame === "mobile" ? 375 : 1440;
-      if (projectKind === "logo design") { aspectRatio = 4 / 3; width = 1200; }
-      if (projectKind === "ui/ux design") { aspectRatio = 16 / 9; width = 1920; }
-      if (projectKind === "campaign design" && screen.formatLabel) {
-        const res = (RESOLUTIONS.CAMPAIGN as any)[screen.formatLabel];
-        if (res) { aspectRatio = res.w / res.h; width = res.w; }
+      if (screen.width && screen.height) {
+        aspectRatio = screen.width / screen.height;
+        width = convertToPx(screen.width, screen.unit);
+      } else {
+        if (projectKind === "logo design") { aspectRatio = 1; width = 800; }
+        if (projectKind === "ui/ux design" || projectKind === "product design" || projectKind === "product design - desktop") { aspectRatio = 16 / 9; width = 1920; }
+        if (projectKind === "product design - app") { aspectRatio = 375 / 812; width = 375; }
+        if (projectKind === "product design - packaging") { aspectRatio = 1; width = 1200; }
+        if ((projectKind === "campaign design" || projectKind === "social media design") && screen.formatLabel) {
+          const res = (RESOLUTIONS.CAMPAIGN as any)[screen.formatLabel];
+          if (res) { aspectRatio = res.w / res.h; width = res.w; }
+        } else if (projectKind === "social media design") {
+          aspectRatio = 1;
+          width = 1080;
+        }
       }
-      if (projectKind === "website design") {
+      if (isWeb) {
         aspectRatio = screen.frame === "mobile" ? RESOLUTIONS.WEBSITE.MOBILE.w / RESOLUTIONS.WEBSITE.MOBILE.h : RESOLUTIONS.WEBSITE.DESKTOP.w / RESOLUTIONS.WEBSITE.DESKTOP.h;
       }
 
@@ -1028,7 +1376,7 @@ export default function ProjectEditorPage() {
           )}
 
           {/* Blueprint Pixel Grid for UI/UX */}
-          {projectKind === "ui/ux design" && (
+          {(projectKind === "ui/ux design" || projectKind?.startsWith("product design")) && (
             <div className="absolute inset-0 bg-[radial-gradient(#000_1px,transparent_1px)] [background-size:24px_24px] opacity-[0.03] pointer-events-none" />
           )}
 
@@ -1042,37 +1390,40 @@ export default function ProjectEditorPage() {
               paddingBottom: 400
             }}
           >
-            {sections.map((sec, idx) => (
-              <div key={sec.id} className="relative group/sec shrink-0">
-                <div className="rounded-3xl border-4 border-foreground/10 bg-white dark:bg-zinc-100/95 shadow-2xl overflow-hidden relative" style={{ aspectRatio, width }}>
-                  {selectedImage ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={selectedImage.url}
-                      alt={selectedImage.filename || "Generated UI"}
-                      className="absolute inset-0 h-full w-full object-contain bg-white"
-                      onError={() => setBrokenImageKeys((prev) => ({ ...prev, [selectedImage.id || selectedImage.url]: true }))}
-                    />
-                  ) : (
-                    <div className="absolute inset-0 flex items-center justify-center opacity-[0.03]"><Layout className="size-64" /></div>
-                  )}
-                  {selectedImage && brokenImageKeys[selectedImage.id || selectedImage.url] ? (
-                    <div className="absolute inset-x-6 bottom-6 rounded-lg bg-amber-50/95 border border-amber-200 px-3 py-2 text-[0.68rem] text-amber-700 font-mono">
-                      Design metadata is saved in DB, but image URL is unreachable right now.
-                    </div>
-                  ) : (
-                    <></>
+            {sections.map((sec, idx) => {
+              const selectedImage = pickImageForSection(screen, sec, idx, generatedUiImages, tree);
+              return (
+                <div key={sec.id} className="relative group/sec shrink-0">
+                  <div className="rounded-3xl border-4 border-foreground/10 bg-white dark:bg-zinc-100/95 shadow-2xl overflow-hidden relative" style={{ aspectRatio, width }}>
+                    {selectedImage ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={selectedImage.url}
+                        alt={selectedImage.filename || "Generated UI"}
+                        className="absolute inset-0 h-full w-full object-contain bg-white"
+                        onError={() => setBrokenImageKeys((prev) => ({ ...prev, [selectedImage.id || selectedImage.url]: true }))}
+                      />
+                    ) : (
+                      <div className="absolute inset-0 flex items-center justify-center opacity-[0.03]"><Layout className="size-64" /></div>
+                    )}
+                    {selectedImage && brokenImageKeys[selectedImage.id || selectedImage.url] ? (
+                      <div className="absolute inset-x-6 bottom-6 rounded-lg bg-amber-50/95 border border-amber-200 px-3 py-2 text-[0.68rem] text-amber-700 font-mono">
+                        Design metadata is saved in DB, but image URL is unreachable right now.
+                      </div>
+                    ) : (
+                      <></>
+                    )}
+                  </div>
+                  <div className="mt-4 flex justify-between px-2">
+                    <div className="text-xs font-mono text-muted-foreground/60 uppercase tracking-tighter">{sec.name}</div>
+                    {projectKind !== "campaign design" && projectKind !== "logo design" && <div className="text-xs font-mono text-muted-foreground/40">S.{idx + 1}</div>}
+                  </div>
+                  {idx === sections.length - 1 && projectKind !== "campaign design" && projectKind !== "logo design" && (
+                    <button onClick={() => handleAddSection(screen.id)} className={cn("absolute flex items-center justify-center bg-foreground/5 rounded-2xl border-2 border-dashed border-foreground/15 hover:border-[#eca8d6]/40 hover:bg-[#eca8d6]/5 transition-all", isMobileHorizontal ? "top-0 -right-24 w-16 h-full" : "left-1/2 -bottom-24 w-full h-16 -translate-x-1/2")}><Plus className="size-8" /></button>
                   )}
                 </div>
-                <div className="mt-4 flex justify-between px-2">
-                  <div className="text-xs font-mono text-muted-foreground/60 uppercase tracking-tighter">{sec.name}</div>
-                  {projectKind !== "campaign design" && projectKind !== "logo design" && <div className="text-xs font-mono text-muted-foreground/40">S.{idx + 1}</div>}
-                </div>
-                {idx === sections.length - 1 && projectKind !== "campaign design" && projectKind !== "logo design" && (
-                  <button onClick={() => handleAddSection(screen.id)} className={cn("absolute flex items-center justify-center bg-foreground/5 rounded-2xl border-2 border-dashed border-foreground/15 hover:border-[#eca8d6]/40 hover:bg-[#eca8d6]/5 transition-all", isMobileHorizontal ? "top-0 -right-24 w-16 h-full" : "left-1/2 -bottom-24 w-full h-16 -translate-x-1/2")}><Plus className="size-8" /></button>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       );
@@ -1104,7 +1455,7 @@ export default function ProjectEditorPage() {
       <div className="shrink-0 z-50 border-b border-foreground/5 bg-background/60 backdrop-blur-2xl h-12 flex items-center justify-between px-4">
         <div className="flex items-center gap-4">
           <Button variant="ghost" size="icon" className="size-8" onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}>
-            <Sidebar className="size-4" />
+            <LayoutGrid className="size-4 text-[#eca8d6]" />
           </Button>
           <button
             onClick={() => handleSafeNavigate("/")}
@@ -1218,22 +1569,31 @@ export default function ProjectEditorPage() {
               <div className="flex items-center justify-between px-6 py-4 border-b border-white/5 shrink-0">
                 <div className="text-sm font-medium">Designer</div>
                 <div className="flex items-center gap-3 text-muted-foreground/60">
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/5 bg-white/[0.02] hover:bg-white/[0.08] transition-all text-[0.65rem] font-bold uppercase tracking-widest text-zinc-500 outline-none group/btn">
-                        Designer <ChevronDown className="size-3 ml-0.5 opacity-40 group-hover/btn:opacity-100 transition-opacity" />
-                      </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-40 bg-black border border-white/10 text-white p-1 rounded-lg">
-                      <DropdownMenuItem className="rounded-md px-3 py-2 hover:bg-white/10 cursor-pointer outline-none transition-colors text-[0.7rem] font-medium">Designer</DropdownMenuItem>
-                      <DropdownMenuItem className="rounded-md px-3 py-2 hover:bg-white/10 cursor-pointer outline-none transition-colors text-[0.7rem] font-medium">Gemini</DropdownMenuItem>
-                      <DropdownMenuItem className="rounded-md px-3 py-2 hover:bg-white/10 cursor-pointer outline-none transition-colors text-[0.7rem] font-medium">GPT-4</DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                  {projectKind !== "multi-page website" && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/5 bg-white/[0.02] hover:bg-white/[0.08] transition-all text-[0.65rem] font-bold uppercase tracking-widest text-zinc-500 outline-none group/btn">
+                          Designer <ChevronDown className="size-3 ml-0.5 opacity-40 group-hover/btn:opacity-100 transition-opacity" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-40 bg-black border border-white/10 text-white p-1 rounded-lg">
+                        <DropdownMenuItem className="rounded-md px-3 py-2 hover:bg-white/10 cursor-pointer outline-none transition-colors text-[0.7rem] font-medium">Designer</DropdownMenuItem>
+                        <DropdownMenuItem className="rounded-md px-3 py-2 hover:bg-white/10 cursor-pointer outline-none transition-colors text-[0.7rem] font-medium">Gemini</DropdownMenuItem>
+                        <DropdownMenuItem className="rounded-md px-3 py-2 hover:bg-white/10 cursor-pointer outline-none transition-colors text-[0.7rem] font-medium">GPT-4</DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
                   <Clock className="size-4 cursor-pointer hover:text-white transition-colors ml-1" />
                 </div>
               </div>
-              <UIDesignerEditorChatPanel projectId={projectId} onImagesChange={mergeGeneratedUiImages} />
+              <UIDesignerEditorChatPanel
+                projectId={projectId}
+                projectKind={projectKind}
+                onImagesChange={mergeGeneratedUiImages}
+                activeScreenId={activeId}
+                onCreateDefaultScreen={() => handleHeaderPlus(true)}
+                activeScreen={activeNode?.kind === "screen" ? activeNode : undefined}
+              />
             </aside>
           </ResizablePanel>
         </ResizablePanelGroup>
@@ -1290,6 +1650,114 @@ export default function ProjectEditorPage() {
           projectName={projectMeta.name}
         />
       ) : null}
+
+      <Dialog open={sizeModalOpen} onOpenChange={setSizeModalOpen}>
+        <DialogContent className="sm:max-w-[400px] p-0 overflow-hidden border-white/10 bg-black/80 backdrop-blur-2xl rounded-3xl text-white">
+          <div className="p-6">
+            <DialogHeader className="space-y-2">
+              <DialogTitle className="font-display text-xl tracking-tight text-white flex items-center gap-2">
+                <span className="size-6 rounded-full bg-[#eca8d6]/10 flex items-center justify-center text-[#eca8d6]">
+                  <Plus className="size-4" />
+                </span>
+                Artboard Dimensions
+              </DialogTitle>
+              <DialogDescription className="text-xs text-zinc-400">
+                Specify the size for your new layout. Artboard auto-scales to fit your workspace.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="mt-6 space-y-4">
+              {/* Unit Selector */}
+              <div className="space-y-2">
+                <label className="text-[0.7rem] font-bold text-zinc-400 uppercase tracking-wider">Unit</label>
+                <div className="grid grid-cols-4 gap-1 p-1 rounded-xl bg-zinc-900/50 border border-white/5">
+                  {(["px", "inch", "cm", "m"] as const).map((u) => (
+                    <button
+                      key={u}
+                      type="button"
+                      onClick={() => setCustomUnit(u)}
+                      className={cn(
+                        "py-1.5 text-xs font-bold uppercase rounded-lg transition-all",
+                        customUnit === u
+                          ? "bg-[#eca8d6] text-black shadow-sm"
+                          : "text-zinc-400 hover:text-white hover:bg-white/5"
+                      )}
+                    >
+                      {u === "inch" ? "in" : u}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Width & Height Fields */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-[0.7rem] font-bold text-zinc-400 uppercase tracking-wider">Width</label>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      step="any"
+                      min="0.1"
+                      placeholder="Width"
+                      value={customWidth}
+                      onChange={(e) => setCustomWidth(e.target.value)}
+                      className="w-full h-10 px-3 rounded-xl border border-white/10 bg-zinc-950/50 text-white placeholder-zinc-600 focus:outline-none focus:border-[#eca8d6]/50 focus:ring-1 focus:ring-[#eca8d6]/50 text-sm font-mono"
+                    />
+                    <span className="absolute right-3 top-2.5 text-[0.65rem] font-bold text-zinc-500 uppercase">
+                      {customUnit === "inch" ? "in" : customUnit}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[0.7rem] font-bold text-zinc-400 uppercase tracking-wider">Height</label>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      step="any"
+                      min="0.1"
+                      placeholder="Height"
+                      value={customHeight}
+                      onChange={(e) => setCustomHeight(e.target.value)}
+                      className="w-full h-10 px-3 rounded-xl border border-white/10 bg-zinc-950/50 text-white placeholder-zinc-600 focus:outline-none focus:border-[#eca8d6]/50 focus:ring-1 focus:ring-[#eca8d6]/50 text-sm font-mono"
+                    />
+                    <span className="absolute right-3 top-2.5 text-[0.65rem] font-bold text-zinc-500 uppercase">
+                      {customUnit === "inch" ? "in" : customUnit}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Dynamic calculation preview */}
+              {customWidth && customHeight && !isNaN(parseFloat(customWidth)) && !isNaN(parseFloat(customHeight)) && (
+                <div className="rounded-xl bg-white/[0.02] border border-white/5 px-3 py-2 flex items-center justify-between text-[0.65rem] text-zinc-500 font-mono">
+                  <span>Pixel Equivalence:</span>
+                  <span className="text-zinc-300">
+                    {Math.round(convertToPx(parseFloat(customWidth), customUnit))} × {Math.round(convertToPx(parseFloat(customHeight), customUnit))} px
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-8 flex gap-3">
+              <Button
+                variant="outline"
+                onClick={() => setSizeModalOpen(false)}
+                className="h-10 rounded-full border border-white/10 bg-transparent text-white hover:bg-white/5 hover:text-white flex-1 text-xs font-bold uppercase tracking-wider"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleCreateCustomArtboard}
+                disabled={!customWidth || !customHeight || isNaN(parseFloat(customWidth)) || isNaN(parseFloat(customHeight))}
+                className="h-10 rounded-full bg-[#eca8d6] text-black hover:bg-[#eca8d6]/90 flex-1 text-xs font-bold uppercase tracking-wider shadow-sm shadow-[#eca8d6]/20"
+              >
+                Create
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

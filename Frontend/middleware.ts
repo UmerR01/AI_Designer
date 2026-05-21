@@ -52,6 +52,15 @@ export async function middleware(req: NextRequest) {
     }
   }
 
+  // Support agents visiting the dashboard or main page should go to the support panel.
+  if (pathname === "/dashboard" || pathname === "/") {
+    if (user.isSupportAgent) {
+      const url = req.nextUrl.clone();
+      url.pathname = "/support";
+      return NextResponse.redirect(url);
+    }
+  }
+
   return NextResponse.next();
 }
 

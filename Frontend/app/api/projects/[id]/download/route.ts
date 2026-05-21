@@ -75,7 +75,7 @@ export async function GET(_: Request, ctx: { params: Promise<{ id: string }> }) 
   zip.file(
     "assets-manifest.json",
     JSON.stringify(
-      assets.map((a) => ({
+      assets.map((a: any) => ({
         id: a.id,
         page_name: a.page_name ?? undefined,
         filename: a.filename,
@@ -89,7 +89,7 @@ export async function GET(_: Request, ctx: { params: Promise<{ id: string }> }) 
 
   const archive = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE", compressionOptions: { level: 6 } });
   const filename = `${project.name || "project"}-${project.id}.zip`.replace(/[\\/:*?"<>|]/g, "_");
-  return new NextResponse(archive, {
+  return new NextResponse(archive as any, {
     status: 200,
     headers: {
       "Content-Type": "application/zip",

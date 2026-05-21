@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Paperclip, RefreshCw, Send, X } from "lucide-react";
+import { Paperclip, RefreshCw, Send, X, Check, Eye, ChevronDown } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -10,7 +10,15 @@ import { postJson } from "@/lib/auth-api";
 import { cn } from "@/lib/utils";
 
 type ChatRole = "user" | "assistant" | "system";
-type ChatMessage = { id: string; role: ChatRole; content: string; createdAt: string };
+
+type ChatMessage = {
+  id: string;
+  role: ChatRole;
+  content: string;
+  createdAt: string;
+  imageUrl?: string;
+  isStyleGuide?: boolean;
+};
 
 type BackendUploadResult =
   | { type: "pdf" | "docx"; text: string }
@@ -25,49 +33,26 @@ type UiDesignerImage = {
   created_at?: string;
 };
 
-type GenerationIntent = "logo" | "mobile" | "poster" | "web" | "generic";
-
-type WsPayload =
-  | {
-    type: "node_start";
-    node_name?: string;
-    message?: string;
-    data?: { progress?: number };
-    timestamp?: string;
-  }
-  | { type: "message"; message?: string; data?: any; timestamp?: string }
-  | { type: "ui_images"; data?: { images?: UiDesignerImage[] }; timestamp?: string }
-  | {
-    type: "node_end";
-    node_name?: string;
-    data?: any;
-    timestamp?: string;
-  }
-  | { type: "error"; message?: string; data?: any; timestamp?: string };
-
-type OutboundWsPayload = {
-  message: string;
-  session_id: string;
-  project_id: string;
-  reference_image?: string | null;
+type PendingAnchor = {
+  image_b64: string;
+  filename: string;
+  screen: string;
+  platform: string;
+  remaining_screens: string[];
 };
+
+type GenerationIntent = "logo" | "mobile" | "poster" | "web" | "generic";
 
 const WS_INITIAL_BACKOFF_MS = 800;
 const WS_MAX_BACKOFF_MS = 30_000;
 const WS_OUTBOUND_QUEUE_CAP = 20;
 
-function nextReconnectDelayMs(attemptIndex: number): number {
-  const capped = Math.min(WS_INITIAL_BACKOFF_MS * 2 ** attemptIndex, WS_MAX_BACKOFF_MS);
-  const jitter = capped * (0.88 + Math.random() * 0.24);
-  return Math.round(jitter);
-}
-
 /** Base URL for UI designer FastAPI (WebSocket + uploads). Set in `.env.local` as `NEXT_PUBLIC_UIDESIGNER_BACKEND_URL`. */
 const UIDESIGNER_BACKEND_BASE =
-  process.env.NEXT_PUBLIC_UIDESIGNER_BACKEND_URL?.trim() || "http://localhost:8002";
+  process.env.NEXT_PUBLIC_UIDESIGNER_BACKEND_URL?.trim() || "http://localhost:8001";
 
-function projectSessionKey(projectId: string) {
-  return `uiDesignerSession.${projectId}`;
+function projectSessionKey(projectId: string, activeScreenId?: string) {
+  return `uiDesignerSession.${projectId}.${activeScreenId || "default"}`;
 }
 
 function createSessionId() {
@@ -135,12 +120,47 @@ function intentInstruction(intent: GenerationIntent): string {
   return "TARGET TYPE: AUTO";
 }
 
+/** Matches project kind string to respective WebSocket endpoint in ui_image_designer.py */
+function getWsEndpointForKind(kind?: string): string {
+  const k = (kind || "").toLowerCase().trim();
+  if (k === "logo design") {
+    return "/ws/logo";
+  }
+  if (k === "social media design") {
+    return "/ws/social_media";
+  }
+  if (k === "practice") {
+    return "/ws/practice";
+  }
+  // Landing page, multi-page website, website design, product design, etc.
+  return "/ws/ui";
+}
+
+function getPlatformForKind(kind?: string): string {
+  const k = (kind || "").toLowerCase().trim();
+  if (k === "product design - app") {
+    return "mobile";
+  }
+  if (k === "product design - desktop" || k === "website design" || k === "landing page" || k === "multi-page website") {
+    return "web";
+  }
+  return "auto";
+}
+
 export function UIDesignerEditorChatPanel({
   projectId,
+  projectKind,
   onImagesChange,
+  activeScreenId,
+  onCreateDefaultScreen,
+  activeScreen,
 }: {
   projectId: string;
+  projectKind?: string;
   onImagesChange?: (images: UiDesignerImage[]) => void;
+  activeScreenId?: string;
+  onCreateDefaultScreen?: () => string;
+  activeScreen?: any;
 }) {
   const [sessionId, setSessionId] = useState<string>("");
   const lastIntentRef = useRef<GenerationIntent>("generic");
@@ -152,24 +172,25 @@ export function UIDesignerEditorChatPanel({
   const imageIdSetRef = useRef<Set<string>>(new Set());
 
   const [draft, setDraft] = useState("");
-  const [wsStatus, setWsStatus] = useState<"disconnected" | "connecting" | "reconnecting" | "connected" | "error">(
-    "disconnected",
-  );
-  const [reconnectAttempt, setReconnectAttempt] = useState(0);
-  const [queuedSendCount, setQueuedSendCount] = useState(0);
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimerRef = useRef<number | null>(null);
-  const reconnectAttemptRef = useRef(0);
-  const outboundQueueRef = useRef<OutboundWsPayload[]>([]);
-  const unmountedRef = useRef(false);
-  const queuedToastShownRef = useRef(false);
-  const prevWsSessionRef = useRef<string | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [statusText, setStatusText] = useState<string | null>(null);
 
+  const wsRef = useRef<WebSocket | null>(null);
+  const unmountedRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const draftRef = useRef(draft);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+
+  const [pendingAnchor, setPendingAnchor] = useState<PendingAnchor | null>(null);
+  const [revisionText, setRevisionText] = useState("");
+  const [showRevisionInput, setShowRevisionInput] = useState(false);
+  const [zoomUrl, setZoomUrl] = useState<string | null>(null);
+
+  // Auto-scroll chat panel to bottom when messages or loading states change
   useEffect(() => {
-    draftRef.current = draft;
-  }, [draft]);
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+    }
+  }, [messages, statusText]);
 
   useEffect(() => {
     if (images.length === 0) return;
@@ -186,7 +207,7 @@ export function UIDesignerEditorChatPanel({
         source: "ui-designer",
         images,
       }).catch(() => {
-        // Non-blocking persistence path; primary save flow still exists.
+        // Non-blocking persistence path
       });
     }, 500);
     return () => {
@@ -195,10 +216,105 @@ export function UIDesignerEditorChatPanel({
     };
   }, [images, projectId, sessionId]);
 
-  const addMessage = useCallback((role: ChatRole, content: string) => {
-    const createdAt = new Date().toISOString();
-    setMessages((prev) => [...prev, { id: crypto.randomUUID(), role, content, createdAt }]);
+  // Per-project/per-screen UI designer session id (persisted so refresh keeps server session).
+  useEffect(() => {
+    if (!activeScreenId) return;
+    try {
+      const skey = projectSessionKey(projectId, activeScreenId);
+      let sid = window.localStorage.getItem(skey);
+      if (!sid) {
+        sid = createSessionId();
+        window.localStorage.setItem(skey, sid);
+      }
+      setSessionId(sid);
+    } catch {
+      setSessionId(createSessionId());
+    }
+  }, [projectId, activeScreenId]);
+
+  // Cleanup websocket when panel unmounts
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+      if (wsRef.current) {
+        try {
+          wsRef.current.close();
+        } catch {
+          // ignore
+        }
+      }
+    };
   }, []);
+
+  // Load messages & images whenever activeScreenId changes!
+  useEffect(() => {
+    if (!activeScreenId) {
+      setMessages([]);
+      setImages([]);
+      imageIdSetRef.current = new Set();
+      return;
+    }
+    // Load messages from localStorage
+    const msgKey = `uiDesigner.messages.${projectId}.${activeScreenId}`;
+    const storedMsg = window.localStorage.getItem(msgKey);
+    if (storedMsg) {
+      try {
+        setMessages(JSON.parse(storedMsg));
+      } catch {
+        setMessages([]);
+      }
+    } else {
+      setMessages([]);
+    }
+
+    // Load images from localStorage
+    const imgKey = `uiDesigner.images.${projectId}.${activeScreenId}`;
+    const storedImg = window.localStorage.getItem(imgKey);
+    if (storedImg) {
+      try {
+        const parsed = JSON.parse(storedImg) as UiDesignerImage[];
+        setImages(parsed);
+        imageIdSetRef.current = new Set(parsed.map((img) => img.id).filter(Boolean) as string[]);
+      } catch {
+        setImages([]);
+        imageIdSetRef.current = new Set();
+      }
+    } else {
+      setImages([]);
+      imageIdSetRef.current = new Set();
+    }
+  }, [projectId, activeScreenId]);
+
+  // Save images to localStorage whenever they change
+  useEffect(() => {
+    if (!activeScreenId) return;
+    const imgKey = `uiDesigner.images.${projectId}.${activeScreenId}`;
+    try {
+      window.localStorage.setItem(imgKey, JSON.stringify(images));
+    } catch (e) {
+      console.warn("localStorage quota exceeded for images cache", e);
+    }
+  }, [images, projectId, activeScreenId]);
+
+  const addMessage = useCallback((role: ChatRole, content: string, imageUrl?: string, isStyleGuide?: boolean) => {
+    const createdAt = new Date().toISOString();
+    setMessages((prev) => {
+      const updated = [
+        ...prev,
+        { id: crypto.randomUUID(), role, content, createdAt, imageUrl, isStyleGuide },
+      ];
+      if (activeScreenId) {
+        const msgKey = `uiDesigner.messages.${projectId}.${activeScreenId}`;
+        try {
+          window.localStorage.setItem(msgKey, JSON.stringify(updated));
+        } catch (e) {
+          console.warn("localStorage quota exceeded for messages cache", e);
+        }
+      }
+      return updated;
+    });
+  }, [projectId, activeScreenId]);
 
   const mergeImages = useCallback(
     (incoming: UiDesignerImage[]) => {
@@ -218,191 +334,173 @@ export function UIDesignerEditorChatPanel({
     [setImages],
   );
 
-  const clearReconnectTimer = useCallback(() => {
-    if (reconnectTimerRef.current != null) {
-      window.clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
-    }
-  }, []);
-
-  const flushOutboundQueue = useCallback(() => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    while (outboundQueueRef.current.length > 0) {
-      const payload = outboundQueueRef.current[0];
-      try {
-        ws.send(JSON.stringify(payload));
-        outboundQueueRef.current.shift();
-      } catch {
-        break;
-      }
-    }
-    setQueuedSendCount(outboundQueueRef.current.length);
-    if (outboundQueueRef.current.length === 0) {
-      queuedToastShownRef.current = false;
-    }
-  }, []);
-
-  const openSocketRef = useRef<(() => void) | null>(null);
-
-  // Per-project UI designer session id (persisted so refresh keeps server session).
-  useEffect(() => {
-    try {
-      const skey = projectSessionKey(projectId);
-      let sid = window.localStorage.getItem(skey);
-      if (!sid) {
-        sid = createSessionId();
-        window.localStorage.setItem(skey, sid);
-      }
-      setSessionId(sid);
-    } catch {
-      setSessionId(createSessionId());
-    }
-  }, [projectId]);
-
-  // WebSocket lifecycle: connect, auto-reconnect with backoff, outbound queue flush on open
-  useEffect(() => {
-    unmountedRef.current = false;
-    clearReconnectTimer();
-    reconnectAttemptRef.current = 0;
-    setReconnectAttempt(0);
-
-    const base = UIDESIGNER_BACKEND_BASE.trim();
-    const sid = sessionId;
-    const sessionChanged = prevWsSessionRef.current !== null && prevWsSessionRef.current !== sid;
-    if (sessionChanged) {
-      outboundQueueRef.current = [];
-      setQueuedSendCount(0);
-      queuedToastShownRef.current = false;
-    }
-    prevWsSessionRef.current = sid;
-
-    if (!sid) return;
-
-    const scheduleReconnect = () => {
-      if (unmountedRef.current) return;
-      clearReconnectTimer();
-      const attemptIdx = reconnectAttemptRef.current;
-      const delay = nextReconnectDelayMs(attemptIdx);
-      reconnectAttemptRef.current = attemptIdx + 1;
-      setReconnectAttempt(attemptIdx + 1);
-      setWsStatus("reconnecting");
-
-      reconnectTimerRef.current = window.setTimeout(() => {
-        reconnectTimerRef.current = null;
-        if (unmountedRef.current) return;
-        openSocket();
-      }, delay);
-    };
-
-    const openSocket = () => {
-      const w = wsRef.current;
-      if (w) {
+  /** Unified WebSocket pipeline handler for sending messages & actions */
+  const executeWebSocketAction = useCallback(
+    (payload: any) => {
+      if (wsRef.current) {
         try {
-          w.close();
-        } catch {
+          wsRef.current.close();
+        } catch (e) {
           // ignore
         }
         wsRef.current = null;
       }
 
+      setIsGenerating(true);
+      setStatusText("Connecting to AI Designer pipeline…");
+
+      const base = UIDESIGNER_BACKEND_BASE.trim();
       const wsBase = toWsBase(base);
-      const wsUrl = `${wsBase}/ws-ui/${sid}`;
-      setWsStatus(reconnectAttemptRef.current > 0 ? "reconnecting" : "connecting");
+      const endpoint = getWsEndpointForKind(projectKind);
+      const wsUrl = `${wsBase}${endpoint}`;
 
       try {
         const socket = new WebSocket(wsUrl);
         wsRef.current = socket;
 
         socket.onopen = () => {
-          if (unmountedRef.current) return;
-          reconnectAttemptRef.current = 0;
-          setReconnectAttempt(0);
-          setWsStatus("connected");
-          flushOutboundQueue();
+          setStatusText("Connected. Submitting request…");
+          socket.send(JSON.stringify(payload));
         };
 
         socket.onmessage = (event) => {
-          let payload: WsPayload | null = null;
+          let data: any;
           try {
-            payload = JSON.parse(event.data) as WsPayload;
+            data = JSON.parse(event.data);
           } catch {
-            // ignore
-          }
-          if (!payload) return;
-
-          if (payload.type === "node_start") {
-            if (payload.message) addMessage("system", payload.message);
             return;
           }
 
-          if (payload.type === "error") {
-            addMessage("system", payload.message || "Backend error");
-            setWsStatus("error");
-            return;
-          }
+          const eventType = data.event || data.type;
+          if (!eventType) return;
 
-          if (payload.type === "message") {
-            if (payload.message) addMessage("assistant", payload.message);
-            return;
-          }
+          switch (eventType) {
+            case "status":
+              setStatusText(data.message || "Working…");
+              break;
 
-          if (payload.type === "ui_images") {
-            const imgs = payload.data?.images ?? [];
-            mergeImages(imgs);
-            return;
-          }
+            case "assistant_message":
+              if (data.message) {
+                addMessage("assistant", data.message);
+              }
+              break;
 
-          if (payload.type === "node_end" && payload.node_name === "image_generator") {
-            const uiImages = payload.data?.ui_images ?? payload.data?.images ?? [];
-            if (Array.isArray(uiImages)) mergeImages(uiImages);
-            return;
+            case "style_guide": {
+              const newImg: UiDesignerImage = {
+                id: crypto.randomUUID(),
+                url: `data:image/png;base64,${data.image_b64}`,
+                filename: data.filename || "style_guide.png",
+                page_name: activeScreenId ? `[ScreenID:${activeScreenId}] Style Guide` : "Style Guide",
+                created_at: new Date().toISOString(),
+              };
+              setImages((prev) => [...prev, newImg]);
+              addMessage(
+                "assistant",
+                "🎨 Generated beautiful brand style guide to match your request:",
+                undefined,
+                true
+              );
+              break;
+            }
+
+            case "anchor_preview": {
+              const newImg: UiDesignerImage = {
+                id: crypto.randomUUID(),
+                url: `data:image/png;base64,${data.image_b64}`,
+                filename: data.filename || "anchor.png",
+                page_name: activeScreenId ? `[ScreenID:${activeScreenId}] ${data.screen || "Anchor Screen"}` : (data.screen || "Anchor Screen"),
+                created_at: new Date().toISOString(),
+              };
+              setImages((prev) => [...prev, newImg]);
+              setPendingAnchor({
+                image_b64: data.image_b64,
+                filename: data.filename || "anchor.png",
+                screen: data.screen || "Anchor Screen",
+                platform: data.platform || "desktop",
+                remaining_screens: data.remaining_screens || [],
+              });
+              addMessage(
+                "assistant",
+                `⚓ Anchor screen generated: "${data.screen || "Dashboard"}". Let's verify the aesthetic. Do you want to Approve or Revise it?`
+              );
+              break;
+            }
+
+            case "screen": {
+              const newImg: UiDesignerImage = {
+                id: crypto.randomUUID(),
+                url: `data:image/png;base64,${data.image_b64}`,
+                filename: data.filename || `screen_${data.index}.png`,
+                page_name: activeScreenId ? `[ScreenID:${activeScreenId}] ${data.name || `Screen ${data.index}`}` : (data.name || `Screen ${data.index}`),
+                created_at: new Date().toISOString(),
+              };
+              setImages((prev) => [...prev, newImg]);
+              addMessage(
+                "assistant",
+                `✨ Screen generated: "${data.name || `Screen ${data.index}`}"`
+              );
+              break;
+            }
+
+            case "logo":
+            case "illustration":
+            case "social_media": {
+              const label =
+                eventType === "logo"
+                  ? "Brand Logo"
+                  : eventType === "illustration"
+                  ? "Illustration"
+                  : "Social Post";
+              const newImg: UiDesignerImage = {
+                id: crypto.randomUUID(),
+                url: `data:image/png;base64,${data.image_b64}`,
+                filename: data.filename || `${eventType}.png`,
+                page_name: activeScreenId ? `[ScreenID:${activeScreenId}] ${label}` : label,
+                created_at: new Date().toISOString(),
+              };
+              setImages((prev) => [...prev, newImg]);
+              addMessage(
+                "assistant",
+                `✦ Generated beautiful custom ${label}:`
+              );
+              break;
+            }
+
+            case "error":
+              addMessage("system", data.message || "Pipeline encountered a generation error.");
+              toast.error(data.message || "Generation error");
+              setStatusText(null);
+              setIsGenerating(false);
+              break;
+
+            case "done":
+              setStatusText(null);
+              setIsGenerating(false);
+              break;
+
+            default:
+              break;
           }
         };
 
         socket.onerror = () => {
-          // Browser gives no useful detail; onclose handles reconnect. Avoid blaming "URL" for every blip.
+          toast.error("WebSocket server error occurred.");
+          setStatusText(null);
+          setIsGenerating(false);
         };
 
-        socket.onclose = (ev) => {
-          if (ev.target !== wsRef.current) return;
-          wsRef.current = null;
-          if (unmountedRef.current) {
-            setWsStatus("disconnected");
-            return;
-          }
-          scheduleReconnect();
+        socket.onclose = () => {
+          setStatusText(null);
+          setIsGenerating(false);
         };
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        setWsStatus("error");
-        toast.error(msg || "Could not connect to UI backend.");
-        scheduleReconnect();
+      } catch (e: any) {
+        toast.error(`Connection failed: ${e.message}`);
+        setStatusText(null);
+        setIsGenerating(false);
       }
-    };
-
-    openSocketRef.current = openSocket;
-    openSocket();
-
-    return () => {
-      unmountedRef.current = true;
-      clearReconnectTimer();
-      const w = wsRef.current;
-      wsRef.current = null;
-      try {
-        w?.close();
-      } catch {
-        // ignore
-      }
-    };
-  }, [sessionId, addMessage, mergeImages, clearReconnectTimer, flushOutboundQueue]);
-
-  const retryConnectNow = useCallback(() => {
-    clearReconnectTimer();
-    reconnectAttemptRef.current = 0;
-    setReconnectAttempt(0);
-    openSocketRef.current?.();
-  }, [clearReconnectTimer]);
+    },
+    [projectKind, addMessage, activeScreenId],
+  );
 
   const onPickFile = useCallback(() => {
     fileInputRef.current?.click();
@@ -414,16 +512,17 @@ export function UIDesignerEditorChatPanel({
       if (!base) return;
       if (!file) return;
       if (file.size > 20 * 1024 * 1024) {
-        toast.error("File too large. Please upload a file under 20MB.");
+        toast.error("File is too large. Please select a file under 20MB.");
         return;
       }
 
-      addMessage("system", `Uploading: ${file.name}…`);
+      addMessage("system", `Uploading context: ${file.name}…`);
       try {
         const formData = new FormData();
         formData.append("file", file);
 
-        const res = await fetch(`${base}/api/upload`, { method: "POST", body: formData });
+        // Corrected upload path
+        const res = await fetch(`${base}/upload`, { method: "POST", body: formData });
         const json = (await res.json()) as BackendUploadResult & { [k: string]: any };
         if (!res.ok) {
           const err = (json as any)?.error || "Upload failed.";
@@ -436,19 +535,25 @@ export function UIDesignerEditorChatPanel({
           return;
         }
 
+        if (json.image_b64) {
+          setReferenceImage(json.image_b64);
+          addMessage("system", "Loaded image as strict aesthetic style guide reference.");
+          return;
+        }
+
         if ((json as any).type === "pdf" || (json as any).type === "docx") {
           const extracted = (json as any).text || "";
           setStoredDocument(extracted);
           const preview = extracted ? extracted.slice(0, 200) + (extracted.length > 200 ? "…" : "") : "";
-          addMessage("system", `Loaded ${json.type.toUpperCase()} (${extracted.length} chars). Now describe what to generate.`);
-          if (preview) addMessage("system", `Preview: ${preview}`);
+          addMessage("system", `Loaded document (${extracted.length} chars). Ready to generate.`);
+          if (preview) addMessage("system", `Preview: "${preview}"`);
           return;
         }
 
         if ((json as any).type === "image") {
           const b64 = (json as any).base64;
           setReferenceImage(b64);
-          addMessage("system", "Loaded reference image. Next message will keep style consistent.");
+          addMessage("system", "Loaded image as strict aesthetic style guide reference.");
           return;
         }
       } catch (e: any) {
@@ -458,32 +563,31 @@ export function UIDesignerEditorChatPanel({
     [addMessage],
   );
 
+  /** Triggers standard design request */
   const sendToBackend = useCallback(() => {
-    const text = draftRef.current.trim();
+    const text = draft.trim();
     if (!text) return;
     if (!sessionId) return;
 
-    const socketOpen = Boolean(wsRef.current && wsRef.current.readyState === WebSocket.OPEN);
-    if (!socketOpen && outboundQueueRef.current.length >= WS_OUTBOUND_QUEUE_CAP) {
-      toast.error("Too many messages are waiting to send. Wait for the connection or use Retry.");
-      return;
+    let currentActiveId = activeScreenId;
+    if (!currentActiveId && onCreateDefaultScreen) {
+      currentActiveId = onCreateDefaultScreen();
     }
 
-    const userText = text;
+    addMessage("user", text);
     setDraft("");
-    addMessage("user", userText);
 
-    const currentIntent = inferIntentFromPrompt(userText);
+    const currentIntent = inferIntentFromPrompt(text);
     const previousIntent = lastIntentRef.current;
     const switchedIntent =
       currentIntent !== "generic" &&
       previousIntent !== "generic" &&
       currentIntent !== previousIntent &&
-      !isEditStylePrompt(userText);
+      !isEditStylePrompt(text);
 
-    let finalMessage = userText;
+    let finalMessage = text;
     if (storedDocument) {
-      finalMessage = `[DOCUMENT CONTEXT]\n${storedDocument}\n\n[USER REQUEST]\n${userText}`;
+      finalMessage = `[DOCUMENT CONTEXT]\n${storedDocument}\n\n[USER REQUEST]\n${text}`;
       setStoredDocument(null);
     }
     if (switchedIntent) {
@@ -495,135 +599,241 @@ export function UIDesignerEditorChatPanel({
     const refImg = referenceImage;
     if (referenceImage) setReferenceImage(null);
 
-    const msg: OutboundWsPayload = {
-      message: finalMessage,
+    const payload: any = {
       session_id: sessionId,
       project_id: projectId,
+      query: finalMessage,
+      platform: getPlatformForKind(projectKind),
+      width: activeScreen?.width,
+      height: activeScreen?.height,
+      format_label: activeScreen?.formatLabel,
+      screen_name: activeScreen?.name,
     };
-    if (refImg) msg.reference_image = refImg;
+    if (refImg) {
+      payload.reference_image_b64 = refImg; // Corrected field name
+    }
 
-    const sendNow = () => {
-      const w = wsRef.current;
-      if (!w || w.readyState !== WebSocket.OPEN) return false;
-      try {
-        w.send(JSON.stringify(msg));
-        return true;
-      } catch {
-        return false;
-      }
+    executeWebSocketAction(payload);
+  }, [draft, sessionId, projectId, activeScreenId, onCreateDefaultScreen, referenceImage, storedDocument, addMessage, executeWebSocketAction, activeScreen]);
+
+  /** Approves anchor design and generates remainder screens */
+  const handleApproveAnchor = useCallback(() => {
+    if (!pendingAnchor) return;
+    setPendingAnchor(null);
+    setShowRevisionInput(false);
+    addMessage("user", "✓ Approve anchor design style");
+
+    const payload = {
+      session_id: sessionId,
+      project_id: projectId,
+      query: "",
+      ui_action: "approve_anchor",
+      platform: getPlatformForKind(projectKind),
+      width: activeScreen?.width,
+      height: activeScreen?.height,
+      format_label: activeScreen?.formatLabel,
+      screen_name: activeScreen?.name,
     };
 
-    if (sendNow()) return;
+    executeWebSocketAction(payload);
+  }, [pendingAnchor, sessionId, projectId, addMessage, executeWebSocketAction, activeScreen]);
 
-    if (outboundQueueRef.current.length >= WS_OUTBOUND_QUEUE_CAP) {
-      toast.error("Too many messages are waiting to send. Wait for the connection or use Retry.");
+  /** Revises anchor design with user feedback */
+  const handleReviseAnchor = useCallback(() => {
+    const text = revisionText.trim();
+    if (!text) {
+      toast.error("Please describe what revisions to apply.");
       return;
     }
+    setPendingAnchor(null);
+    setShowRevisionInput(false);
+    setRevisionText("");
+    addMessage("user", `✎ Revision request: "${text}"`);
 
-    outboundQueueRef.current.push(msg);
-    setQueuedSendCount(outboundQueueRef.current.length);
-    if (!queuedToastShownRef.current) {
-      queuedToastShownRef.current = true;
-      toast.message("Connection lost. Your message is queued and will send automatically when the link is back.");
-    }
-  }, [addMessage, projectId, referenceImage, sessionId, storedDocument]);
+    const payload = {
+      session_id: sessionId,
+      project_id: projectId,
+      query: text,
+      ui_action: "revise_anchor",
+      anchor_feedback: text,
+      platform: getPlatformForKind(projectKind),
+      width: activeScreen?.width,
+      height: activeScreen?.height,
+      format_label: activeScreen?.formatLabel,
+      screen_name: activeScreen?.name,
+    };
+
+    executeWebSocketAction(payload);
+  }, [revisionText, sessionId, projectId, addMessage, executeWebSocketAction, activeScreen]);
 
   const clearReference = useCallback(() => {
     setReferenceImage(null);
-    toast.message("Reference image cleared.");
+    toast.message("Reference style image cleared.");
   }, []);
 
   const clearDocument = useCallback(() => {
     setStoredDocument(null);
-    toast.message("Document context cleared.");
+    toast.message("Document structure cleared.");
   }, []);
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
-      {(wsStatus === "connecting" || wsStatus === "reconnecting") && (
-        <div className="shrink-0 flex items-center justify-between gap-2 border-b border-white/10 bg-white/[0.04] px-4 py-2 text-[0.72rem] text-white/80">
-          <span className="min-w-0 truncate">
-            {wsStatus === "reconnecting"
-              ? `Reconnecting to UI backend… (attempt ${reconnectAttempt})`
-              : "Connecting to UI backend…"}
-          </span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 shrink-0 gap-1.5 text-white/90 hover:text-white hover:bg-white/10"
-            onClick={() => retryConnectNow()}
-          >
-            <RefreshCw className="size-3.5" />
-            Retry now
-          </Button>
+    <div className="flex flex-col h-full overflow-hidden bg-background">
+      {/* Dynamic Status Progress Bar */}
+      {statusText && (
+        <div className="shrink-0 flex items-center justify-between gap-3 border-b border-white/5 bg-white/[0.02] px-5 py-3 text-[0.72rem] text-zinc-400">
+          <div className="flex items-center gap-2 min-w-0">
+            <RefreshCw className="size-3.5 animate-spin text-[#eca8d6] shrink-0" />
+            <span className="truncate font-medium">{statusText}</span>
+          </div>
+          <span className="text-[0.6rem] font-bold tracking-widest text-[#eca8d6] uppercase animate-pulse">Running</span>
         </div>
       )}
 
-      {queuedSendCount > 0 && (
-        <div className="shrink-0 border-b border-amber-500/25 bg-amber-500/10 px-4 py-1.5 text-center text-[0.7rem] text-amber-100/90">
-          {queuedSendCount} message{queuedSendCount === 1 ? "" : "s"} queued — will send when connected
-        </div>
-      )}
-
-      <div className="p-6 pb-2 space-y-3 thin-scrollbar overflow-y-auto flex-1">
-        {storedDocument ? (
-          <div className="rounded-2xl border border-[#eca8d6]/20 bg-[#eca8d6]/5 p-3 flex items-center justify-between gap-3">
-            <div className="text-[0.78rem] text-white/90">Document loaded ({storedDocument.length} chars)</div>
-            <Button type="button" variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-white" onClick={clearDocument}>
+      {/* Messages Stream */}
+      <div ref={scrollContainerRef} className="p-6 pb-2 space-y-4 thin-scrollbar overflow-y-auto flex-1">
+        {storedDocument && (
+          <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4 flex items-center justify-between gap-3 animate-in fade-in duration-300">
+            <div className="text-[0.75rem] text-zinc-300 font-medium">Document attached ({storedDocument.length} chars)</div>
+            <Button type="button" variant="ghost" size="icon" className="h-7 w-7 text-zinc-400 hover:text-white" onClick={clearDocument}>
               <X className="size-4" />
             </Button>
           </div>
-        ) : null}
+        )}
 
-        {referenceImage ? (
-          <div className="rounded-2xl border border-[#eca8d6]/20 bg-[#eca8d6]/5 p-3 flex items-center justify-between gap-3">
-            <div className="text-[0.78rem] text-white/90">Reference image loaded</div>
-            <Button type="button" variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-white" onClick={clearReference}>
+        {referenceImage && (
+          <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4 flex items-center justify-between gap-3 animate-in fade-in duration-300">
+            <div className="text-[0.75rem] text-zinc-300 font-medium">Style guide image loaded</div>
+            <Button type="button" variant="ghost" size="icon" className="h-7 w-7 text-zinc-400 hover:text-white" onClick={clearReference}>
               <X className="size-4" />
             </Button>
           </div>
-        ) : null}
+        )}
 
-        <div className="mt-4">
-          <div className="text-xs font-mono uppercase tracking-[0.2em] text-muted-foreground/40">Chat</div>
-          <div className="mt-3 space-y-3">
+        <div className="mt-2">
+          <div className="text-xs font-mono uppercase tracking-[0.25em] text-zinc-600">Workspace Logs</div>
+          <div className="mt-4 space-y-4">
             {messages.length === 0 ? (
-              <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-[0.78rem] text-white/70">
-                Ask anything to start generating UI screens.
+              <div className="rounded-3xl border border-white/5 bg-white/[0.01] p-6 text-[0.8rem] text-zinc-400 leading-relaxed text-center">
+                Describe your desired screen or asset below to start generating high-fidelity UI layouts.
               </div>
             ) : (
               messages.map((m) => (
                 <div
                   key={m.id}
                   className={cn(
-                    "rounded-2xl p-4 text-[0.85rem] leading-[1.6] border",
+                    "rounded-3xl p-5 text-[0.82rem] leading-relaxed border transition-all duration-300 animate-in fade-in slide-in-from-bottom-2",
                     m.role === "user"
-                      ? "bg-foreground/[0.03] border-white/5 border-dashed"
+                      ? "bg-white/[0.02] border-white/10 border-dashed"
                       : m.role === "assistant"
                         ? "bg-[#eca8d6]/[0.02] border-[#eca8d6]/10"
-                        : "bg-white/[0.02] border-white/10"
+                        : "bg-white/[0.01] border-white/5"
                   )}
                 >
-                  <div className={cn("text-[0.55rem] font-bold uppercase tracking-[0.2em] mb-2", m.role === "user" ? "text-muted-foreground/50" : "text-[#eca8d6]")}>
-                    {m.role === "user" ? "You" : m.role === "assistant" ? "Designer" : "System"}
+                  <div className={cn("text-[0.6rem] font-bold uppercase tracking-[0.2em] mb-3", m.role === "user" ? "text-zinc-500" : "text-[#eca8d6]")}>
+                    {m.role === "user" ? "You" : m.role === "assistant" ? "AI Designer" : "System"}
                   </div>
-                  <div className="text-foreground/90 font-medium whitespace-pre-wrap">{m.content}</div>
+                  <div className="text-zinc-200 font-medium whitespace-pre-wrap">{m.content}</div>
+
+                  {m.imageUrl && (
+                    <div className="relative group mt-4 overflow-hidden rounded-2xl border border-white/10 bg-black/40">
+                      <img
+                        src={m.imageUrl}
+                        alt="Generated layout"
+                        className="w-full object-cover max-h-64 cursor-zoom-in group-hover:scale-[1.02] transition-transform duration-500"
+                        onClick={() => setZoomUrl(m.imageUrl || null)}
+                      />
+                      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
+                        <Eye className="size-6 text-white" />
+                      </div>
+                    </div>
+                  )}
                 </div>
               ))
             )}
           </div>
         </div>
 
+        {/* Dynamic Glassmorphic Approval & Revision Card */}
+        {pendingAnchor && (
+          <div className="rounded-[32px] border border-[#eca8d6]/25 bg-black/40 backdrop-blur-2xl p-6 space-y-5 animate-in zoom-in-95 duration-500 shadow-2xl">
+            <div className="text-[0.65rem] font-bold uppercase tracking-widest text-[#eca8d6] flex items-center gap-1.5">
+              <span>⚓</span> Anchor Approval Request
+            </div>
+
+            <div className="relative group rounded-2xl border border-white/10 overflow-hidden bg-black">
+              <img
+                src={`data:image/png;base64,${pendingAnchor.image_b64}`}
+                alt="Anchor layout"
+                className="w-full object-cover max-h-56 cursor-zoom-in group-hover:scale-[1.02] transition-transform duration-500"
+                onClick={() => setZoomUrl(`data:image/png;base64,${pendingAnchor.image_b64}`)}
+              />
+              <div className="absolute top-3 left-3 bg-black/60 backdrop-blur-md text-[0.62rem] font-bold px-3 py-1.5 rounded-full border border-white/15 tracking-wide text-zinc-300">
+                {pendingAnchor.screen} ({pendingAnchor.platform})
+              </div>
+            </div>
+
+            <p className="text-[0.78rem] text-zinc-400 leading-relaxed font-medium">
+              Anchor design is complete. Approve this style guide to generate the remaining screens automatically:
+              <br />
+              <span className="inline-block mt-2 px-3 py-1 bg-white/[0.04] border border-white/5 rounded-lg text-zinc-300 font-mono text-[0.7rem]">
+                {pendingAnchor.remaining_screens.join(", ")}
+              </span>
+            </p>
+
+            {showRevisionInput ? (
+              <div className="space-y-3 animate-in slide-in-from-top-2 duration-300">
+                <Textarea
+                  value={revisionText}
+                  onChange={(e) => setRevisionText(e.target.value)}
+                  placeholder="Describe your design revisions clearly (e.g. 'Make the main header font bold, change background style to a premium gradient')…"
+                  className="bg-black/60 border border-white/10 rounded-2xl text-[0.8rem] min-h-[72px] placeholder:text-zinc-600 focus-visible:ring-1 focus-visible:ring-white/20"
+                />
+                <div className="flex gap-2">
+                  <Button
+                    onClick={handleReviseAnchor}
+                    className="flex-1 rounded-xl bg-white text-black hover:bg-zinc-200 text-xs font-semibold"
+                  >
+                    Submit Revision
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    onClick={() => setShowRevisionInput(false)}
+                    className="rounded-xl border border-white/10 hover:bg-white/5 text-zinc-300 text-xs"
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex gap-2 pt-1">
+                <Button
+                  onClick={handleApproveAnchor}
+                  className="flex-1 rounded-xl bg-[#eca8d6] hover:bg-[#eb9cd1] text-black text-xs font-semibold shadow-xl shadow-[#eca8d6]/10 flex items-center justify-center gap-1.5"
+                >
+                  <Check className="size-4" />
+                  Approve Style
+                </Button>
+                <Button
+                  onClick={() => setShowRevisionInput(true)}
+                  className="flex-1 rounded-xl bg-transparent border border-white/10 hover:bg-white/5 text-zinc-300 text-xs font-semibold"
+                >
+                  Request Revision
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
+      {/* Input Draft Area */}
       <div className="p-6 pt-2 shrink-0">
-        <div className="relative group bg-zinc-900/50 rounded-[28px] border border-white/10 p-1.5 focus-within:ring-1 focus-within:ring-white/20 transition-all">
+        <div className="relative group bg-zinc-950/60 rounded-[28px] border border-white/10 p-2 focus-within:ring-1 focus-within:ring-[#eca8d6]/30 focus-within:border-[#eca8d6]/20 transition-all shadow-xl">
           <Textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            placeholder="Ask anything…"
-            className="min-h-[52px] w-full resize-none border-0 bg-transparent px-4 py-3 text-[0.9rem] placeholder:text-zinc-600 focus-visible:ring-0 no-scrollbar"
+            placeholder="Describe screen/design requirements…"
+            disabled={isGenerating || pendingAnchor !== null}
+            className="min-h-[56px] w-full resize-none border-0 bg-transparent px-4 py-3 text-[0.85rem] placeholder:text-zinc-600 focus-visible:ring-0 no-scrollbar text-zinc-200"
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
@@ -631,17 +841,22 @@ export function UIDesignerEditorChatPanel({
               }
             }}
           />
-          <div className="flex items-center justify-between px-4 pb-2">
+          <div className="flex items-center justify-between px-4 pb-2 pt-1">
             <div className="flex items-center gap-4 text-zinc-500">
-              <Paperclip className="size-4 cursor-pointer hover:text-white transition-colors" onClick={onPickFile} />
+              <Paperclip
+                className="size-4 cursor-pointer hover:text-white transition-colors"
+                onClick={isGenerating || pendingAnchor !== null ? undefined : onPickFile}
+              />
+              <span className="text-[0.62rem] font-bold uppercase tracking-wider text-zinc-600 font-mono">
+                {projectKind || "Web Layout"}
+              </span>
             </div>
             <Button
               size="icon"
-              className="size-9 rounded-xl bg-white text-black hover:bg-zinc-200 shadow-xl transition-all"
+              className="size-9 rounded-xl bg-white text-black hover:bg-zinc-200 shadow-xl transition-all flex items-center justify-center shrink-0"
               type="button"
               onClick={sendToBackend}
-              disabled={!draft.trim()}
-              title={wsStatus !== "connected" ? "Sends when connected (or queues if offline)" : "Send"}
+              disabled={!draft.trim() || isGenerating || pendingAnchor !== null}
             >
               <Send className="size-3.5 fill-current" />
             </Button>
@@ -661,7 +876,23 @@ export function UIDesignerEditorChatPanel({
           />
         </div>
       </div>
+
+      {/* Lightbox / Zoom Modal */}
+      {zoomUrl && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/90 backdrop-blur-xl animate-in fade-in duration-300">
+          <button
+            onClick={() => setZoomUrl(null)}
+            className="absolute top-6 right-6 size-12 rounded-full border border-white/10 bg-white/5 hover:bg-white/10 text-white flex items-center justify-center shadow-2xl transition-all"
+          >
+            <X className="size-6" />
+          </button>
+          <img
+            src={zoomUrl}
+            alt="Expanded visual layout"
+            className="max-w-[92vw] max-h-[88vh] rounded-3xl border border-white/10 shadow-2xl object-contain animate-in zoom-in-95 duration-300"
+          />
+        </div>
+      )}
     </div>
   );
 }
-

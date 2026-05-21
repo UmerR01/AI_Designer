@@ -12,8 +12,8 @@ export async function GET() {
 
   // If DB was reset/replaced, a stale cookie may reference a user that no longer exists.
   // Treat it as signed-out to avoid downstream FK errors (e.g., project creation).
-  const existing = await sql()<{ id: string }[]>`
-    select id from users where id = ${user.id} limit 1
+  const existing = await sql()<{ id: string; email_verified: boolean }[]>`
+    select id, email_verified from users where id = ${user.id} limit 1
   `;
   if (!existing[0]?.id) {
     cookieStore.set(SESSION_COOKIE_NAME, "", { path: "/", maxAge: 0, httpOnly: true, sameSite: "lax" });
@@ -28,6 +28,7 @@ export async function GET() {
         first_name: user.firstName,
         last_name: user.lastName,
         is_support_agent: user.isSupportAgent,
+        email_verified: Boolean(existing[0]?.email_verified),
       },
     },
     { status: 200 }

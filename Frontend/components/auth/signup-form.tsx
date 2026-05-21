@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
+import { Turnstile } from "@marsidev/react-turnstile";
+import type { TurnstileInstance } from "@marsidev/react-turnstile";
 import { postJson } from "@/lib/auth-api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,6 +15,9 @@ import { AuthShell } from "@/components/auth/auth-shell";
 export function SignupFormView() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [turnstileToken, setTurnstileToken] = useState("");
+  const turnstileRef = useRef<TurnstileInstance>(null);
+  const siteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || "";
 
   return (
     <AuthShell
@@ -40,20 +45,46 @@ export function SignupFormView() {
         onSubmit={async (e) => {
           e.preventDefault();
           if (isSubmitting) return;
+
+          if (!turnstileToken) {
+            return toast.error("Please complete the security check.");
+          }
+          
+          const form = e.currentTarget;
+          const formData = new FormData(form);
+          const first = String(formData.get("first") ?? "");
+          const last = String(formData.get("last") ?? "");
+          const email = String(formData.get("email") ?? "");
+          const password = String(formData.get("password") ?? "");
+
+          // Quick Client Validation
+          if (first.length < 2 || last.length < 2) {
+             return toast.error("First and last name must be at least 2 characters.");
+          }
+          if (password.length < 8) {
+             return toast.error("Password must be at least 8 characters long.");
+          }
+          if (!/\d/.test(password)) {
+             return toast.error("Password must contain at least one number.");
+          }
+
           setIsSubmitting(true);
           try {
-            const form = e.currentTarget;
-            const formData = new FormData(form);
             await postJson<{ ok: true }>("/api/auth/signup", {
-              first_name: String(formData.get("first") ?? ""),
-              last_name: String(formData.get("last") ?? ""),
-              email: String(formData.get("email") ?? ""),
-              password: String(formData.get("password") ?? ""),
+              first_name: first,
+              last_name: last,
+              email: email,
+              password: password,
+              recaptchaToken: turnstileToken, // API still uses the key recaptchaToken
             });
-            toast.success("Account created.");
-            window.location.href = "/dashboard";
+            toast.success("Account created. Please check your email to verify!");
+            turnstileRef.current?.reset();
+            setTurnstileToken("");
+            form.reset();
           } catch (err: any) {
             toast.error(err?.detail ?? err?.message ?? "Sign up failed.");
+            turnstileRef.current?.reset();
+            setTurnstileToken("");
           } finally {
             setIsSubmitting(false);
           }
@@ -118,6 +149,16 @@ export function SignupFormView() {
             </button>
           </div>
         </div>
+
+        {siteKey && (
+          <div className="flex justify-center my-2">
+            <Turnstile
+              ref={turnstileRef}
+              siteKey={siteKey}
+              onSuccess={(token) => setTurnstileToken(token)}
+            />
+          </div>
+        )}
 
         <Button
           type="submit"

@@ -5,9 +5,18 @@ import { sql } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
+  const url = new URL(req.url);
+  const status = url.searchParams.get("status") || "active";
+
   const user = await requireUser().catch(() => null);
   if (!user) return NextResponse.json({ detail: "Unauthorized." }, { status: 401 });
+
+  // Lazy cleanup of projects deleted more than 30 days ago
+  await sql()`
+    delete from projects 
+    where deleted_at < now() - interval '30 days'
+  `.catch(() => {});
 
   let rows: {
     id: string;
@@ -30,8 +39,8 @@ export async function GET() {
       left join project_members m
         on m.project_id = p.id
        and m.user_id = ${user.id}
-      where p.owner_id = ${user.id}
-         or m.user_id is not null
+      where (p.owner_id = ${user.id} or m.user_id is not null)
+        and ((${status === "deleted"}::boolean and p.deleted_at is not null) or (${status !== "deleted"}::boolean and p.deleted_at is null))
       order by p.updated_at desc
     `;
   } catch (e: unknown) {
@@ -49,6 +58,7 @@ export async function GET() {
       select p.id, p.name, p.kind, p.created_at, p.updated_at
       from projects p
       where p.owner_id = ${user.id}
+        and ((${status === "deleted"}::boolean and p.deleted_at is not null) or (${status !== "deleted"}::boolean and p.deleted_at is null))
       order by p.updated_at desc
     `;
   }

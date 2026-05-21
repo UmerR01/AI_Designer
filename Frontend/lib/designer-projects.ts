@@ -1,9 +1,16 @@
 export const DESIGNER_PROJECTS_KEY = "designer.projects.v1";
 
 export type ProjectKind =
+  | "landing page"
+  | "multi-page website"
+  | "product design"
+  | "product design - desktop"
+  | "product design - app"
+  | "product design - packaging"
+  | "logo design"
+  | "social media design"
   | "website design"
   | "ui/ux design"
-  | "logo design"
   | "campaign design"
   | "practice";
 

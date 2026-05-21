@@ -2,11 +2,11 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
-import { Bell, Folder, Home, Settings, Search, LogOut, LayoutGrid } from "lucide-react";
+import { useEffect, useMemo, useState, useRef } from "react";
+import { Bell, Folder, Home, Settings, Search, LogOut, LayoutGrid, Cloud, Database, FolderPlus, Star, Library, Plus, ChevronDown, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 
-import { getMeCached, postJson } from "@/lib/auth-api";
+import { getMeCached, postJson, getJson } from "@/lib/auth-api";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -72,7 +72,75 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [me, setMe] = useState<MeResponse["user"] | null>(null);
   const [loading, setLoading] = useState(true);
-  const [railCollapsed, setRailCollapsed] = useState(false);
+  const [railCollapsed, setRailCollapsed] = useState(true); // default closed on mobile
+  const sidebarRef = useRef<HTMLElement>(null);
+
+  // Storage / Project count state
+  const [projCount, setProjCount] = useState(0);
+
+  // Libraries state
+  const [libraries, setLibraries] = useState<string[]>([]);
+  const [showAddLib, setShowAddLib] = useState(false);
+  const [newLibName, setNewLibName] = useState("");
+  const [libsOpen, setLibsOpen] = useState(true);
+
+  const fetchProjCount = async () => {
+    try {
+      const res = await getJson<{ projects: any[] }>("/api/projects?status=active");
+      setProjCount(res.projects.length);
+    } catch (e) {}
+  };
+
+  useEffect(() => {
+    fetchProjCount();
+    // Listen to changes to recalculate count instantly
+    window.addEventListener("storage", fetchProjCount);
+    window.addEventListener("projects-updated", fetchProjCount);
+    return () => {
+      window.removeEventListener("storage", fetchProjCount);
+      window.removeEventListener("projects-updated", fetchProjCount);
+    };
+  }, []);
+
+  useEffect(() => {
+    const loadLibs = () => {
+      try {
+        const list = localStorage.getItem("designer.libraries_list");
+        if (list) {
+          const parsed = JSON.parse(list);
+          // filter out Landing Pages and Mobile Apps as requested
+          const filtered = parsed.filter((item: string) => item !== "Landing Pages" && item !== "Mobile Apps");
+          setLibraries(filtered);
+          localStorage.setItem("designer.libraries_list", JSON.stringify(filtered));
+        } else {
+          // Empty list by default as requested
+          setLibraries([]);
+          localStorage.setItem("designer.libraries_list", JSON.stringify([]));
+        }
+      } catch (e) {}
+    };
+    
+    loadLibs();
+    window.addEventListener("storage", loadLibs);
+    return () => window.removeEventListener("storage", loadLibs);
+  }, []);
+
+  const handleCreateLibrary = (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = newLibName.trim();
+    if (!name) return;
+    if (libraries.includes(name)) {
+      toast.error("Library already exists!");
+      return;
+    }
+    const updated = [...libraries, name];
+    setLibraries(updated);
+    localStorage.setItem("designer.libraries_list", JSON.stringify(updated));
+    setNewLibName("");
+    setShowAddLib(false);
+    toast.success(`Library "${name}" created!`);
+    window.dispatchEvent(new Event("storage"));
+  };
 
   useEffect(() => {
     try {
@@ -89,6 +157,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     } catch {
       // ignore
     }
+  }, [railCollapsed]);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (window.innerWidth < 1024) { // only apply click-outside on small screens where it acts like a drawer
+        if (sidebarRef.current && !sidebarRef.current.contains(event.target as Node)) {
+          if (!railCollapsed) {
+            setRailCollapsed(true);
+          }
+        }
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [railCollapsed]);
 
   const sectionTitle = useMemo(() => {
@@ -146,56 +228,214 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       {/* Left rail — fixed to viewport so it never scrolls with page */}
       {!isSupportPage && (
-        <aside
-          className={cn(
-            "fixed top-4 bottom-4 z-40 w-[4.25rem]",
-            railCollapsed ? "lg:w-[4.25rem]" : "lg:w-64",
-            "left-[max(1rem,calc((100vw_-_100rem)/2_+_1rem))]",
-            "sm:left-[max(1.5rem,calc((100vw_-_100rem)/2_+_1.5rem))]",
+        <>
+          {/* Mobile Overlay */}
+          {!railCollapsed && (
+            <div className="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm lg:hidden transition-opacity" />
           )}
-        >
-          <div className="flex h-full flex-col overflow-y-auto rounded-2xl border border-foreground/10 bg-background/40 backdrop-blur-xl">
-            <div className="px-3 lg:px-4 pt-4 pb-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  <button
-                    type="button"
-                    className="size-9 rounded-xl border border-foreground/10 bg-foreground/5 grid place-items-center hover:bg-foreground/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#eca8d6]/50"
-                    onClick={() => setRailCollapsed((v) => !v)}
-                    aria-label={railCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-                  >
-                    <LayoutGrid className="size-4 text-[#eca8d6]" />
-                  </button>
-                  <Link href="/dashboard" className={cn("hidden lg:block", railCollapsed && "lg:hidden")}>
-                    <div className="font-display text-lg tracking-tight">Designer</div>
-                    <div className="font-mono text-[0.625rem] text-muted-foreground -mt-0.5">workspace</div>
-                  </Link>
+          <aside
+            ref={sidebarRef}
+            className={cn(
+              "fixed top-4 bottom-4 z-40 transition-all duration-300",
+              railCollapsed ? "w-[4.25rem] -left-20 sm:-left-24 lg:left-[max(1.5rem,calc((100vw_-_100rem)/2_+_1.5rem))]" : "w-64 left-4 sm:left-6 lg:left-[max(1.5rem,calc((100vw_-_100rem)/2_+_1.5rem))]"
+            )}
+          >
+            <div className="flex h-full flex-col overflow-y-auto rounded-2xl border border-foreground/10 bg-background/90 lg:bg-background/40 backdrop-blur-xl shadow-2xl lg:shadow-none">
+              <div className="px-3 lg:px-4 pt-4 pb-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <button
+                      type="button"
+                      className="size-9 shrink-0 rounded-xl border border-foreground/10 bg-foreground/5 grid place-items-center hover:bg-foreground/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#eca8d6]/50"
+                      onClick={() => setRailCollapsed((v) => !v)}
+                      aria-label={railCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                    >
+                      <LayoutGrid className="size-4 text-[#eca8d6]" />
+                    </button>
+                    <Link href="/dashboard" className={cn("hidden lg:block", railCollapsed && "lg:hidden")}>
+                      <div className="font-display text-lg tracking-tight">Designer</div>
+                      <div className="font-mono text-[0.625rem] text-muted-foreground -mt-0.5">workspace</div>
+                    </Link>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <nav className="space-y-1 px-2 pb-3 lg:px-3">
-              {nav.map((item) => {
-                const active = navItemActive(pathname, item.href);
-                const Icon = item.icon;
-                return (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    className={cn(
-                      "flex items-center gap-3 rounded-xl border px-3 py-2 text-sm transition-colors",
-                      "border-foreground/10 bg-foreground/[0.04] hover:bg-foreground/[0.06]",
-                      active && "bg-foreground/7",
+              <nav className="space-y-1 px-2 pb-3 lg:px-3">
+                {nav.map((item) => {
+                  const active = navItemActive(pathname, item.href);
+                  const Icon = item.icon;
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      className={cn(
+                        "flex items-center gap-3 rounded-xl border px-3 py-2 text-sm transition-colors",
+                        "border-foreground/10 bg-foreground/[0.04] hover:bg-foreground/[0.06]",
+                        active && "bg-foreground/7",
+                      )}
+                      onClick={() => {
+                        if (window.innerWidth < 1024) setRailCollapsed(true);
+                      }}
+                    >
+                      <Icon className="size-4 shrink-0 text-[#eca8d6]" />
+                      <span className={cn("hidden lg:inline", railCollapsed && "lg:hidden")}>{item.label}</span>
+                    </Link>
+                  );
+                })}
+              </nav>
+ 
+              {/* Library Navigation Item / Collapsible Dropdown */}
+              <div className="px-2 pb-3 lg:px-3 space-y-1">
+                <div
+                  className={cn(
+                    "flex items-center justify-between rounded-xl border px-3 py-2 text-sm transition-colors cursor-pointer",
+                    "border-foreground/10 bg-foreground/[0.04] hover:bg-foreground/[0.06]",
+                    (pathname === "/projects" && (window?.location?.search?.includes("library=") || window?.location?.search?.includes("filter=favorites"))) && "bg-foreground/7"
+                  )}
+                  onClick={() => setLibsOpen(!libsOpen)}
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <Library className="size-4 shrink-0 text-[#eca8d6]" />
+                    <span className={cn("hidden lg:inline text-sm font-medium", railCollapsed && "lg:hidden")}>Library</span>
+                  </div>
+                  <div className={cn("flex items-center gap-1.5 shrink-0", railCollapsed && "lg:hidden")}>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowAddLib(!showAddLib);
+                      }}
+                      className="p-0.5 rounded hover:bg-foreground/10 hover:text-foreground transition-all"
+                      title="New Library"
+                    >
+                      <Plus className="size-3.5 text-muted-foreground hover:text-foreground" />
+                    </button>
+                    <div className="p-0.5 rounded transition-all">
+                      <ChevronDown className={cn("size-3.5 text-muted-foreground transition-transform duration-200", libsOpen && "rotate-180")} />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Submenu for Library */}
+                {libsOpen && !railCollapsed && (
+                  <div className="mt-1 space-y-1 pl-2 animate-in fade-in slide-in-from-top-1 duration-200">
+                    {/* Add Library Inline Form */}
+                    {showAddLib && (
+                      <form 
+                        onSubmit={handleCreateLibrary} 
+                        className="px-2 py-1"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <Input
+                          type="text"
+                          placeholder="Library name..."
+                          value={newLibName}
+                          onChange={(e) => setNewLibName(e.target.value)}
+                          className="h-8 text-xs bg-background/50 border-foreground/10 focus-visible:ring-[#eca8d6]"
+                          autoFocus
+                          onBlur={() => {
+                            if (!newLibName) setShowAddLib(false);
+                          }}
+                        />
+                      </form>
                     )}
-                  >
-                    <Icon className="size-4 text-[#eca8d6]" />
-                    <span className={cn("hidden lg:inline", railCollapsed && "lg:hidden")}>{item.label}</span>
-                  </Link>
-                );
-              })}
-            </nav>
-          </div>
-        </aside>
+
+                    {/* Favorites link (In Library only) */}
+                    <Link
+                      href="/projects?filter=favorites"
+                      className={cn(
+                        "flex items-center gap-3 rounded-xl border px-3 py-1.5 text-xs transition-colors",
+                        "border-transparent hover:bg-foreground/[0.02]",
+                        pathname === "/projects" && pathname + window?.location?.search === "/projects?filter=favorites"
+                          ? "bg-foreground/5 border-foreground/5 text-foreground font-medium"
+                          : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      <Star className="size-3.5 text-amber-400 fill-amber-400 shrink-0" />
+                      <span>Favorites</span>
+                    </Link>
+
+                    {/* Dynamic User Libraries list */}
+                    {libraries.map((lib) => {
+                      const libHref = `/projects?library=${encodeURIComponent(lib)}`;
+                      return (
+                        <Link
+                          key={lib}
+                          href={libHref}
+                          className={cn(
+                            "flex items-center gap-3 rounded-xl border px-3 py-1.5 text-xs transition-colors",
+                            "border-transparent hover:bg-foreground/[0.02]",
+                            pathname === "/projects" && pathname + decodeURIComponent(window?.location?.search || "") === `/projects?library=${lib}`
+                              ? "bg-foreground/5 border-foreground/5 text-foreground font-medium"
+                              : "text-muted-foreground hover:text-foreground"
+                          )}
+                        >
+                          <Library className="size-3.5 text-[#eca8d6] shrink-0" />
+                          <span className="truncate">{lib}</span>
+                        </Link>
+                      );
+                    })}
+
+                    {libraries.length === 0 && !showAddLib && (
+                      <div className="px-3 py-2 text-[10px] text-muted-foreground italic text-center border border-dashed border-foreground/5 rounded-xl">
+                        No custom libraries. Click "+" to create.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex-1" />
+
+              <div className="px-3 lg:px-4 pb-4 mt-auto">
+                {/* Expanded Storage View */}
+                {(() => {
+                  const storageUsed = Number((projCount * 0.48 + 0.35).toFixed(1));
+                  const percentage = Math.min((storageUsed / 5.0) * 100, 100);
+                  const isFull = storageUsed >= 4.0;
+                  return (
+                    <div className={cn("rounded-xl border border-foreground/10 bg-foreground/[0.02] p-3 transition-all", railCollapsed && "lg:hidden")}>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2 text-sm font-medium">
+                          <Cloud className="size-4 text-[#eca8d6]" />
+                          <span>Storage</span>
+                        </div>
+                        <span className="text-xs text-muted-foreground font-mono">{storageUsed} / 5 GB</span>
+                      </div>
+                      <div className="h-1.5 w-full bg-foreground/10 rounded-full overflow-hidden">
+                        <div className="h-full bg-[#eca8d6] rounded-full transition-all duration-300" style={{ width: `${percentage}%` }} />
+                      </div>
+                      {/* Condition: >= 4 GB (80%) */}
+                      {isFull && (
+                        <div className="mt-3">
+                          <Button className="w-full h-8 text-[0.65rem] font-bold uppercase tracking-wider bg-[#eca8d6] hover:bg-[#eca8d6]/90 text-white rounded-lg shadow-sm">
+                            Buy More Space
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {/* Collapsed Storage View */}
+                {(() => {
+                  const storageUsed = Number((projCount * 0.48 + 0.35).toFixed(1));
+                  const isFull = storageUsed >= 4.0;
+                  return (
+                    <div className={cn("hidden justify-center py-2", railCollapsed && "lg:flex")}>
+                      <div className="flex size-9 items-center justify-center rounded-xl border border-foreground/10 bg-foreground/[0.04] relative group hover:bg-foreground/10 transition-colors">
+                        <Cloud className="size-4 text-[#eca8d6]" />
+                        {isFull && (
+                          <div className="absolute top-0 right-0 size-2 rounded-full bg-destructive border-2 border-background" />
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+
+            </div>
+          </aside>
+        </>
       )}
 
       <div

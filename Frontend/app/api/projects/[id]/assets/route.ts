@@ -47,7 +47,7 @@ export async function GET(_: Request, ctx: { params: Promise<{ id: string }> }) 
 
   return NextResponse.json(
     {
-      images: rows.map((r) => ({
+      images: rows.map((r: any) => ({
         id: r.id,
         page_name: r.page_name ?? undefined,
         filename: r.filename,
@@ -128,7 +128,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       : {};
   const nextData = {
     ...existingData,
-    generatedUiImages: canonical.map((r) => ({
+    generatedUiImages: canonical.map((r: any) => ({
       id: r.id,
       page_name: r.page_name ?? undefined,
       filename: r.filename,

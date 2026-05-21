@@ -5,7 +5,7 @@ import { getJson, postJson } from "@/lib/auth-api";
 import type { DesignerProject } from "@/lib/designer-projects";
 import { formatProjectDate } from "@/lib/designer-projects";
 
-export function useDesignerProjects() {
+export function useDesignerProjects(status: "active" | "deleted" = "active") {
   const [projects, setProjects] = useState<DesignerProject[]>([]);
   const [hydrated, setHydrated] = useState(false);
 
@@ -13,7 +13,7 @@ export function useDesignerProjects() {
     let cancelled = false;
     const loadOnce = async () => {
       const res = await getJson<{ projects: { id: string; name: string; kind: string; created_at: string; updated_at: string }[] }>(
-        "/api/projects"
+        `/api/projects?status=${status}`
       );
       if (cancelled) return;
       setProjects(
@@ -45,7 +45,7 @@ export function useDesignerProjects() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [status]);
 
   const createProject = useCallback(async (name: string, kind?: string) => {
     const res = await postJson<{ project: { id: string; name: string; kind: string; created_at: string; updated_at: string } }>(
@@ -63,11 +63,25 @@ export function useDesignerProjects() {
     return p;
   }, []);
 
-  const removeProject = useCallback((id: string) => {
+  const removeProject = useCallback(async (id: string, permanent: boolean = false) => {
+    try {
+      await fetch(`/api/projects/${id}${permanent ? '?permanent=true' : ''}`, { method: 'DELETE' });
+    } catch {
+      // Ignore
+    }
     setProjects((prev) => prev.filter((p) => p.id !== id));
   }, []);
 
-  const updateProject = useCallback((id: string, patch: Partial<DesignerProject>) => {
+  const updateProject = useCallback(async (id: string, patch: Partial<DesignerProject> & { restore?: boolean }) => {
+    try {
+      await fetch(`/api/projects/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+    } catch {
+      // Ignore
+    }
     setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
   }, []);
 

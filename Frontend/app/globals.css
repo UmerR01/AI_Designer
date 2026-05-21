@@ -164,7 +164,7 @@
     }
   }
 
-  /* Auth routes: one screen tall (vh/dvh); not position:fixed — avoids split layout bugs */
+  /* Auth routes: strict split layout, inner panels will scroll smoothly if needed */
   .auth-shell-viewport {
     box-sizing: border-box;
     min-height: 100vh;
