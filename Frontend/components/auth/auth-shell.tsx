@@ -36,9 +36,9 @@ export function AuthShell({
   childrenClassName,
 }: AuthShellProps) {
   return (
-    <div className="auth-shell-viewport flex min-h-0 flex-col bg-background text-foreground md:grid md:grid-cols-[minmax(0,1fr)_minmax(0,min(32.5rem,46vw))] md:grid-rows-1 md:overflow-hidden">
+    <div className="auth-shell-viewport flex flex-col bg-background text-foreground md:grid md:grid-cols-[minmax(0,1fr)_minmax(0,min(32.5rem,46vw))] md:grid-rows-1">
       {/* Left — brand / mood */}
-      <aside className="relative hidden min-h-0 min-w-0 flex-col justify-start overflow-hidden border-foreground/10 p-[clamp(1.25rem,4vw,4rem)] pb-[clamp(1.25rem,5vh,3.5rem)] pt-[clamp(1.25rem,5vh,3.5rem)] noise-overlay md:flex md:border-r">
+      <aside className="relative hidden flex-col justify-start overflow-hidden border-foreground/10 p-[clamp(1.25rem,4vw,4rem)] pb-[clamp(1.25rem,5vh,3.5rem)] pt-[clamp(1.25rem,5vh,3.5rem)] noise-overlay md:flex md:border-r">
         {/* Bridge — full-bleed mood; overlays keep type legible */}
         <div className="pointer-events-none absolute inset-0" aria-hidden>
           <Image
@@ -99,20 +99,20 @@ export function AuthShell({
       </aside>
 
       {/* Right — form (narrow rail; rest is left column) */}
-      <div className="relative flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden bg-background px-[clamp(1rem,5vw,2.5rem)] py-[clamp(0.75rem,3vh,2.5rem)] md:max-w-none">
+      <div className="relative flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-y-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] bg-background px-[clamp(1.5rem,5vw,3rem)] py-[clamp(2rem,4vh,3rem)] md:max-w-none">
         <div
           className="pointer-events-none absolute inset-x-0 top-0 h-[22vh] bg-gradient-to-b from-[#eca8d6]/[0.09] via-[#eca8d6]/[0.02] to-transparent"
           aria-hidden
         />
-        <div className="mb-[clamp(0.75rem,2vh,1.5rem)] shrink-0 md:hidden">
+        <div className="mb-[clamp(1.5rem,3vh,2rem)] shrink-0 md:hidden">
           <Link href="/" className="inline-flex items-center gap-2">
-            <span className="font-display text-[clamp(1.375rem,4vw,1.75rem)] tracking-tight">Designer</span>
+            <span className="font-display text-[clamp(1.5rem,4vw,1.75rem)] tracking-tight">Designer</span>
             <span className="font-mono text-[0.625rem] text-muted-foreground">TM</span>
           </Link>
         </div>
 
-        <div className="relative flex min-h-0 w-full flex-1 flex-col justify-start overflow-y-auto overscroll-contain pt-[clamp(0.25rem,1vh,0.75rem)] md:justify-center md:pt-0 [scrollbar-gutter:stable]">
-          <div className="mx-auto w-full max-w-full min-w-0">
+        <div className="relative flex w-full flex-col my-auto">
+          <div className="mx-auto w-full max-w-full">
             <header className={cn("mb-6 sm:mb-8", headerClassName)}>
               {eyebrow ? (
                 <p className="mb-1 text-[0.75rem] font-mono uppercase tracking-[0.2em] text-[#eca8d6]">
@@ -154,7 +154,7 @@ export function AuthShell({
           </div>
         </div>
 
-        <p className="shrink-0 pt-[clamp(0.5rem,2vh,1.5rem)] text-center text-[0.75rem] font-mono text-muted-foreground">
+        <p className="shrink-0 mt-[clamp(2rem,4vh,3rem)] text-center text-[0.75rem] font-mono text-muted-foreground">
           © {new Date().getFullYear()} Designer
         </p>
       </div>

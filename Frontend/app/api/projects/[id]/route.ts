@@ -36,6 +36,7 @@ export async function GET(_: Request, ctx: { params: Promise<{ id: string }> }) 
 
 const PatchSchema = z.object({
   name: z.string().min(1).max(200).optional(),
+  restore: z.boolean().optional(),
 });
 
 export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }> }) {
@@ -51,7 +52,23 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
   if (!parsed.success) return NextResponse.json({ detail: "Invalid input." }, { status: 400 });
 
   const name = parsed.data.name?.trim();
-  if (!name) return NextResponse.json({ detail: "Nothing to update." }, { status: 400 });
+  const restore = parsed.data.restore;
+  if (!name && restore === undefined) return NextResponse.json({ detail: "Nothing to update." }, { status: 400 });
+
+  if (restore) {
+    const updated = await sql()<{
+      id: string;
+      name: string;
+      kind: string;
+      updated_at: string;
+    }>`
+      update projects
+      set deleted_at = null, updated_at = now()
+      where id = ${id}
+      returning id, name, kind, updated_at
+    `;
+    return NextResponse.json({ project: updated[0] }, { status: 200 });
+  }
 
   const updated = await sql()<{
     id: string;
@@ -68,7 +85,10 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
   return NextResponse.json({ project: updated[0] }, { status: 200 });
 }
 
-export async function DELETE(_: Request, ctx: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: Request, ctx: { params: Promise<{ id: string }> }) {
+  const url = new URL(req.url);
+  const permanent = url.searchParams.get("permanent") === "true";
+
   const user = await requireUser().catch(() => null);
   if (!user) return NextResponse.json({ detail: "Unauthorized." }, { status: 401 });
 
@@ -76,9 +96,11 @@ export async function DELETE(_: Request, ctx: { params: Promise<{ id: string }> 
   const role = await getUserRoleForProject(user.id, id);
   if (role !== "owner") return NextResponse.json({ detail: "Forbidden." }, { status: 403 });
 
-  await sql()`
-    delete from projects where id = ${id}
-  `;
+  if (permanent) {
+    await sql()`delete from projects where id = ${id}`;
+  } else {
+    await sql()`update projects set deleted_at = now() where id = ${id}`;
+  }
 
   return NextResponse.json({ ok: true }, { status: 200 });
 }

@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
+import { Turnstile } from "@marsidev/react-turnstile";
+import type { TurnstileInstance } from "@marsidev/react-turnstile";
 import { postJson } from "@/lib/auth-api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,6 +18,10 @@ export function LoginFormView() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [email, setEmail] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [turnstileToken, setTurnstileToken] = useState("");
+  
+  const turnstileRef = useRef<TurnstileInstance>(null);
+  const siteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || "";
 
   return (
     <AuthShell
@@ -48,20 +54,36 @@ export function LoginFormView() {
         onSubmit={async (e) => {
           e.preventDefault();
           if (isSubmitting) return;
+
+          // Quick Client Validation
+          const form = e.currentTarget;
+          const formData = new FormData(form);
+          const emailInput = String(formData.get("email") ?? "");
+          const passwordInput = String(formData.get("password") ?? "");
+
+          if (!emailInput || !passwordInput) {
+            return toast.error("Please fill in all fields.");
+          }
+
+          if (!turnstileToken) {
+            return toast.error("Please complete the security check.");
+          }
+
           setIsSubmitting(true);
           try {
-            const form = e.currentTarget;
-            const formData = new FormData(form);
             await postJson<{ user: any }>("/api/auth/login", {
-              email: String(formData.get("email") ?? ""),
-              password: String(formData.get("password") ?? ""),
+              email: emailInput,
+              password: passwordInput,
               remember,
+              recaptchaToken: turnstileToken, // API uses recaptchaToken variable name still
             });
             toast.success("Welcome back.");
             window.location.href = "/dashboard";
           } catch (err: any) {
             const msg = String(err?.detail ?? err?.message ?? "Sign in failed.");
             toast.error(msg);
+            turnstileRef.current?.reset();
+            setTurnstileToken("");
           } finally {
             setIsSubmitting(false);
           }
@@ -111,6 +133,16 @@ export function LoginFormView() {
             </button>
           </div>
         </div>
+
+        {siteKey && (
+          <div className="flex justify-center my-2">
+            <Turnstile
+              ref={turnstileRef}
+              siteKey={siteKey}
+              onSuccess={(token) => setTurnstileToken(token)}
+            />
+          </div>
+        )}
 
         <div className="flex items-center gap-2">
           <Checkbox

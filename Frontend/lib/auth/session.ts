@@ -58,3 +58,25 @@ export async function verifySession(token: string): Promise<SessionUser | null> 
   }
 }
 
+export async function signEmailVerificationToken(email: string): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  return await new SignJWT({ email, action: "verify" })
+    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+    .setIssuedAt(now)
+    .setExpirationTime(now + 60 * 60 * 24) // 24 hours
+    .sign(getSecretKey());
+}
+
+export async function verifyEmailVerificationToken(token: string): Promise<string | null> {
+  try {
+    const { payload } = await jwtVerify(token, getSecretKey());
+    if (payload.action === "verify" && typeof payload.email === "string") {
+      return payload.email;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+

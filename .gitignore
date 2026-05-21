@@ -10,3 +10,6 @@ build/
 .vscode/
 .idea/
 *.log
+backend/pipeline_outputs/
+credentials.json
+backend/credentials.json

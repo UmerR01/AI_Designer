@@ -19,8 +19,13 @@ export async function ensureAuthSchema() {
       last_name text not null,
       is_support_agent boolean not null default false,
       password_hash text not null,
+      email_verified boolean not null default false,
       created_at timestamptz not null default now()
     )
+  `;
+  // Add column for existing tables
+  await sql()`
+    alter table users add column if not exists email_verified boolean not null default false;
   `;
   await sql()`
     create index if not exists idx_users_is_support_agent

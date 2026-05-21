@@ -16,6 +16,8 @@ export type EditorTreeNode =
     sections?: { id: string; name: string }[];
     /** Coordinates for Practice/Infinite Canvas */
     position?: { x: number; y: number };
+    width?: number;
+    height?: number;
   };
 
 /**
@@ -43,7 +45,7 @@ export const RESOLUTIONS = {
   },
 };
 
-export const DEFAULT_EDITOR_KIND: ProjectKind = "ui/ux design";
+export const DEFAULT_EDITOR_KIND: ProjectKind = "landing page";
 
 export function resolveProjectKind(kind: ProjectKind | undefined): ProjectKind {
   return kind ?? DEFAULT_EDITOR_KIND;
@@ -89,58 +91,18 @@ export function isDefaultUiUxBootstrapTree(tree: EditorTreeNode[]): boolean {
 
 export function getEditorBootstrap(kind: ProjectKind): EditorBootstrap {
   switch (kind) {
-    case "website design":
-      return {
-        tree: [
-          { id: F_WEB_D, kind: "folder", name: "Desktop view", children: [] },
-          { id: F_WEB_M, kind: "folder", name: "Mobile view", children: [] },
-        ],
-        openFolders: { [F_WEB_D]: true, [F_WEB_M]: true },
-        activeId: F_WEB_D,
-      };
-    case "ui/ux design":
-      return {
-        tree: [
-          {
-            id: F_UX,
-            kind: "folder",
-            name: "Screens",
-            children: [
-              {
-                id: S_UX_1,
-                kind: "screen",
-                name: "Screen 1",
-                frame: "desktop",
-                sections: [{ id: crypto.randomUUID(), name: "First Section" }],
-                expansionDirection: "vertical",
-              },
-            ],
-          }
-        ],
-        openFolders: { [F_UX]: true },
-        activeId: S_UX_1,
-      };
     case "campaign design":
-      // Campaigns start with just the folder; selecting it shows the Gallery
       return {
-        tree: [{ id: F_UX, kind: "folder", name: "Campaign assets", children: [] }],
+        tree: [{ id: F_UX, kind: "folder", name: "Social Media Assets", children: [] }],
         openFolders: { [F_UX]: true },
         activeId: F_UX,
       };
-    case "logo design":
-      return {
-        tree: [{ id: F_LOGO, kind: "folder", name: "Logo", children: [] }],
-        openFolders: { [F_LOGO]: true },
-        activeId: F_LOGO,
-      };
-    case "practice":
+    default:
       return {
         tree: [],
         openFolders: {},
         activeId: "",
       };
-    default:
-      return getEditorBootstrap("ui/ux design");
   }
 }
 
@@ -153,8 +115,10 @@ export function defaultFrameForFolder(folderId: string, folderName: string): "de
 }
 
 export function sidebarFilesLabel(kind: ProjectKind): string {
-  if (kind === "website design" || kind === "practice") return "Project screens";
-  return "Project files";
+  if (kind === "campaign design") {
+    return "PROJECT FILES";
+  }
+  return "PROJECT SCREENS";
 }
 
 export function findNodeById(nodes: EditorTreeNode[], id: string): EditorTreeNode | null {
@@ -234,5 +198,37 @@ export function addSectionToScreen(nodes: EditorTreeNode[], screenId: string, se
     }
     return n;
   });
+}
+
+function regenerateIds(node: EditorTreeNode): EditorTreeNode {
+  const clone = JSON.parse(JSON.stringify(node)) as EditorTreeNode;
+  clone.id = crypto.randomUUID();
+  if (clone.kind === "screen" && clone.sections) {
+    clone.sections = clone.sections.map((s) => ({ ...s, id: crypto.randomUUID() }));
+  }
+  if (clone.kind === "folder" && clone.children) {
+    clone.children = clone.children.map(regenerateIds);
+  }
+  return clone;
+}
+
+export function duplicateNodeById(nodes: EditorTreeNode[], id: string): EditorTreeNode[] {
+  const result: EditorTreeNode[] = [];
+  for (const n of nodes) {
+    if (n.id === id) {
+      result.push(n);
+      const clone = regenerateIds(n);
+      clone.name = `${clone.name} (Copy)`;
+      result.push(clone);
+    } else if (n.kind === "folder") {
+      result.push({
+        ...n,
+        children: duplicateNodeById(n.children, id),
+      });
+    } else {
+      result.push(n);
+    }
+  }
+  return result;
 }
 
