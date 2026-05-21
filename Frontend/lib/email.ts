@@ -165,6 +165,53 @@ export async function sendPasswordResetEmail(args: { toEmail: string; resetUrl: 
   });
 }
 
+export async function sendVerificationEmail(args: { toEmail: string; verifyUrl: string; fromEmail?: string }) {
+  const from = args.fromEmail ?? defaultMailFrom();
+  const transporter = nodemailer.createTransport(smtpConfig());
+  const preheader = "Verify your email address.";
+
+  await transporter.sendMail({
+    from,
+    to: args.toEmail,
+    subject: "Verify your email address",
+    text: [
+      `Welcome to Designer!`,
+      ``,
+      `Please click the link below to verify your email address and activate your account:`,
+      args.verifyUrl,
+      ``,
+      `If you weren’t expecting this, you can safely ignore this email.`,
+    ].join("\n"),
+    html: `
+      <div style="display:none; max-height:0; overflow:hidden; opacity:0; color:transparent;">
+        ${escapeHtml(preheader)}
+      </div>
+      <div style="background:#0b0b10; padding:32px 12px;">
+        <div style="max-width:640px; margin:0 auto; border-radius:28px; overflow:hidden; border:1px solid rgba(255,255,255,0.08); background:rgba(17,17,24,0.86);">
+          <div style="padding:26px 26px 18px 26px; background:
+            radial-gradient(800px 240px at 0% 0%, rgba(236,168,214,0.22), transparent 60%);">
+            <div style="display:flex; align-items:center; gap:10px;">
+              <div style="width:14px; height:14px; border-radius:999px; background:#eca8d6;"></div>
+              <div style="font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; font-weight:700; color:#fff; font-size:18px;">Designer</div>
+            </div>
+            <h1 style="margin:16px 0 6px 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; font-size:26px; color:#fff;">Welcome to Designer!</h1>
+            <p style="margin:0; color:rgba(255,255,255,0.72); font-size:14px;">Tap the button below to verify your email address and activate your account.</p>
+          </div>
+          <div style="padding:22px 26px 26px 26px;">
+            <a href="${args.verifyUrl}" style="
+              display:inline-block; padding:12px 18px; border-radius:999px; background:#eca8d6; color:#0b0b10;
+              text-decoration:none; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+              font-weight:700;">Verify Email</a>
+            <div style="margin-top:22px; color:rgba(255,255,255,0.42); font-size:12px; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;">
+              If you weren’t expecting this, you can safely ignore this email.
+            </div>
+          </div>
+        </div>
+      </div>
+    `,
+  });
+}
+
 function escapeHtml(s: string) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }

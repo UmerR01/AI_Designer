@@ -71,34 +71,14 @@ export async function POST(_req_: Request) {
     const { signEmailVerificationToken } = await import("@/lib/auth/session");
     const token = await signEmailVerificationToken(user.email);
     
-    // Send email via nodemailer
+    // Send email using shared email helper
     try {
-      const nodemailer = await import("nodemailer");
-      const transporter = nodemailer.createTransport({
-        host: process.env.EMAIL_HOST || "smtp.gmail.com",
-        port: Number(process.env.EMAIL_PORT) || 587,
-        secure: (Number(process.env.EMAIL_PORT) || 587) === 465,
-        auth: {
-          user: process.env.EMAIL_HOST_USER,
-          pass: (process.env.EMAIL_HOST_PASSWORD || "").replace(/\s+/g, ""),
-        },
-      });
-
+      const { sendVerificationEmail } = await import("@/lib/email");
       const verifyUrl = `${getAppOrigin(_req_)}/api/auth/verify?token=${token}`;
-      
-      await transporter.sendMail({
-        from: `"Designer" <${process.env.EMAIL_HOST_USER}>`,
-        to: user.email,
-        subject: "Verify your email address",
-        html: `
-          <h2>Welcome to Designer!</h2>
-          <p>Please click the link below to verify your email address and activate your account:</p>
-          <a href="${verifyUrl}" style="display: inline-block; padding: 10px 20px; background-color: #eca8d6; color: #000; text-decoration: none; border-radius: 5px; font-weight: bold; margin-top: 10px;">Verify Email</a>
-        `,
-      });
+      await sendVerificationEmail({ toEmail: user.email, verifyUrl });
     } catch (emailErr: any) {
       // If email fails, delete the user so they can try again, and return the exact error
-      console.error("Nodemailer failed:", emailErr);
+      console.error("Verification email failed:", emailErr);
       await sql()`delete from users where id = ${user.id}`;
       return NextResponse.json({ detail: "Failed to send verification email. SMTP Error: " + emailErr.message }, { status: 500 });
     }
