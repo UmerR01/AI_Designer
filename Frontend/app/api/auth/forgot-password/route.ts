@@ -52,7 +52,7 @@ export async function POST(req: Request) {
       values (${user.id}, ${tokenHash}, ${expiresAt.toISOString()})
     `;
 
-    const resetUrl = `${getAppOrigin()}/reset-password?token=${encodeURIComponent(rawToken)}`;
+    const resetUrl = `${getAppOrigin(req)}/reset-password?token=${encodeURIComponent(rawToken)}`;
 
     try {
       await sendPasswordResetEmail({ toEmail: email, resetUrl });

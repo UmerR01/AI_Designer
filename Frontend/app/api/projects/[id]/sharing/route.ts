@@ -5,6 +5,7 @@ import { requireUser } from "@/lib/auth/server";
 import { sql } from "@/lib/db";
 import { getUserRoleForProject } from "@/lib/projects/authz";
 import { sendInviteEmail } from "@/lib/email";
+import { getAppOrigin } from "@/lib/auth/password-reset";
 
 export const dynamic = "force-dynamic";
 
@@ -86,18 +87,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     returning id, token, email, role
   `;
 
-  const envUrl = process.env.NEXT_PUBLIC_APP_URL ?? process.env.APP_URL ?? process.env.VERCEL_URL;
-  const requestOrigin = (() => {
-    try {
-      return new URL(req.url).origin;
-    } catch {
-      return "http://localhost:3000";
-    }
-  })();
-  const origin = envUrl
-    ? (envUrl.startsWith("http") ? envUrl : `https://${envUrl}`)
-    : requestOrigin;
-  const inviteUrl = `${origin}/invite/${invite[0].token}`;
+  const inviteUrl = `${getAppOrigin(req)}/invite/${invite[0].token}`;
 
   try {
     await sendInviteEmail({

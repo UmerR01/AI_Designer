@@ -5,6 +5,7 @@ import { sql } from "@/lib/db";
 import { dbConnectionErrorResponse } from "@/lib/db-connection-error";
 import { ensureAuthSchema } from "@/lib/auth/bootstrap";
 import { SESSION_COOKIE_NAME, signSession } from "@/lib/auth/session";
+import { getAppOrigin } from "@/lib/auth/password-reset";
  
 const SignupSchema = z.object({
   first_name: z.string().min(1).max(80),
@@ -83,7 +84,7 @@ export async function POST(_req_: Request) {
         },
       });
 
-      const verifyUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/auth/verify?token=${token}`;
+      const verifyUrl = `${getAppOrigin(_req_)}/api/auth/verify?token=${token}`;
       
       await transporter.sendMail({
         from: `"Designer" <${process.env.EMAIL_HOST_USER}>`,
