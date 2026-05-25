@@ -22,6 +22,13 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
+  serverExternalPackages: [],
+  experimental: {
+    serverActions: {
+      bodySizeLimit: "200mb",
+    },
+  },
+  middlewareClientMaxBodySize: "200mb",
 }
 
 export default nextConfig
