@@ -18,10 +18,20 @@ if (!projectId) {
   process.exit(1);
 }
 
-const databaseUrl = process.env.DATABASE_URL;
+let databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
-  console.error("Missing DATABASE_URL environment variable.");
-  process.exit(1);
+  const name = process.env.DB_NAME;
+  const user = process.env.DB_USER;
+  const password = process.env.DB_PASSWORD || "";
+  const host = process.env.DB_HOST || "localhost";
+  const port = process.env.DB_PORT || "5432";
+  if (name && user) {
+    const creds = password ? `${user}:${encodeURIComponent(password)}` : user;
+    databaseUrl = `postgres://${creds}@${host}:${port}/${name}`;
+  } else {
+    console.error("Missing DB config. Set DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT in .env.local");
+    process.exit(1);
+  }
 }
 
 function listManifestFiles(rootDir) {

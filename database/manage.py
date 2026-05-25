@@ -18,7 +18,7 @@ DB config — set EITHER individual vars (Django-style):
 OR one URL:
   DATABASE_URL=postgres://designer_user:StrongPassword123!@localhost:5411/graphicdesigner
 
-Put them in database/.env, Frontend/.env.local, or export in shell.
+Put them in Frontend/.env.local or export in shell.
 """
 from __future__ import annotations
 
@@ -33,15 +33,12 @@ FRONTEND_ROOT = ROOT.parent / "Frontend"
 
 
 def load_env_files() -> None:
-    """Load .env files (database/.env first, then Frontend/.env and .env.local)."""
+    """Load env from Frontend/.env.local (single source of truth)."""
     try:
         from dotenv import load_dotenv
     except ImportError:
         return
-    load_dotenv(ROOT / ".env")
-    load_dotenv(FRONTEND_ROOT / ".env")
     load_dotenv(FRONTEND_ROOT / ".env.local", override=True)
-    load_dotenv(ROOT / ".env", override=True)
 
 
 def build_database_url() -> str | None:
@@ -69,7 +66,7 @@ def run_alembic(args: list[str]) -> int:
     url = build_database_url()
     if not url:
         print(
-            "DB not configured. Set these in database/.env or Frontend/.env.local:\n"
+            "DB not configured. Set these in Frontend/.env.local:\n"
             "  DB_NAME=graphicdesigner\n"
             "  DB_USER=designer_user\n"
             "  DB_PASSWORD=YourPassword\n"
