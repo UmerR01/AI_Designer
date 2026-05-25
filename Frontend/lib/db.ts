@@ -1,24 +1,31 @@
 import postgres from "postgres";
 
-/**
- * Lazily create the SQL client so builds don't fail when `DATABASE_URL`
- * isn't present in the local environment.
- */
+function buildDbUrl(): string {
+  const explicit = process.env.DATABASE_URL;
+  if (explicit) return explicit;
+
+  const name = process.env.DB_NAME;
+  const user = process.env.DB_USER;
+  const password = process.env.DB_PASSWORD ?? "";
+  const host = process.env.DB_HOST ?? "localhost";
+  const port = process.env.DB_PORT ?? "5432";
+
+  if (!name || !user) {
+    throw new Error(
+      "Database not configured. Set DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT in .env.local",
+    );
+  }
+
+  const creds = password ? `${user}:${encodeURIComponent(password)}` : user;
+  return `postgres://${creds}@${host}:${port}/${name}`;
+}
+
 let _sql: ReturnType<typeof postgres> | null = null;
 
-/**
- * Returns a Postgres tagged-template client. Route handlers use `sql()<Row>()\`...\``;
- * the `<Row>` cast is for typings only.
- */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function sql(): any {
   if (_sql) return _sql;
-  const url = process.env.DATABASE_URL;
-  if (!url) throw new Error("Missing DATABASE_URL. Set it in your environment variables.");
-  _sql = postgres(url, {
-    // Works reliably across local/prod Postgres without prepared statement cache pitfalls.
-    prepare: false,
-  });
+  _sql = postgres(buildDbUrl(), { prepare: false });
   return _sql;
 }
 

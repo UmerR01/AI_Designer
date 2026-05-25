@@ -41,20 +41,21 @@ npm run dev                    # runs on http://localhost:3000
 2. `python manage.py makemigrations -m "describe the change"`
 3. `python manage.py migrate`
 
-### DB Config (`database/.env`)
+## Environment Variables (`Frontend/.env.local`)
+
+All config lives in one file — `Frontend/.env.local`:
+
 ```
 DB_NAME=graphicdesigner
 DB_USER=postgres
 DB_PASSWORD=admin1234
 DB_HOST=localhost
 DB_PORT=5432
-```
 
----
-
-## Environment Variables (`Frontend/.env.local`)
-```
-DATABASE_URL="postgres://postgres:admin1234@localhost:5432/graphicdesigner"
 AUTH_SECRET=<your-secret>
 NEXT_PUBLIC_UIDESIGNER_BACKEND_URL=http://localhost:8001
+NEXT_PUBLIC_TURNSTILE_SITE_KEY=<your-cloudflare-site-key>
+TURNSTILE_SECRET_KEY=<your-cloudflare-secret-key>
 ```
+
+Both the Frontend and `database/manage.py` migrations read from this file.

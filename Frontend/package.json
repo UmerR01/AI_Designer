@@ -7,7 +7,6 @@
     "dev": "next dev --turbopack",
     "dev:webpack": "next dev --webpack",
     "dev:turbo": "next dev --turbopack",
-    "db:preflight": "node scripts/db-preflight.mjs",
     "db:backfill:ui-designs": "node scripts/backfill-ui-designs-to-assets.mjs",
     "lint": "eslint .",
     "start": "next start"
