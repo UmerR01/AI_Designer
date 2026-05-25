@@ -4,8 +4,7 @@ import Link from "next/link";
 import { useState, useRef } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
-import { Turnstile } from "@marsidev/react-turnstile";
-import type { TurnstileInstance } from "@marsidev/react-turnstile";
+import { TurnstileWidget } from "@/components/ui/turnstile-widget";
 import { postJson } from "@/lib/auth-api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,8 +19,7 @@ export function LoginFormView() {
   const [showPassword, setShowPassword] = useState(false);
   const [turnstileToken, setTurnstileToken] = useState("");
   
-  const turnstileRef = useRef<TurnstileInstance>(null);
-  const siteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || "";
+  const turnstileResetKey = useRef(0);
 
   return (
     <AuthShell
@@ -86,7 +84,7 @@ export function LoginFormView() {
           } catch (err: any) {
             const msg = String(err?.detail ?? err?.message ?? "Sign in failed.");
             toast.error(msg);
-            turnstileRef.current?.reset();
+            turnstileResetKey.current += 1;
             setTurnstileToken("");
           } finally {
             setIsSubmitting(false);
@@ -138,15 +136,10 @@ export function LoginFormView() {
           </div>
         </div>
 
-        {siteKey && (
-          <div className="flex justify-center my-2">
-            <Turnstile
-              ref={turnstileRef}
-              siteKey={siteKey}
-              onSuccess={(token) => setTurnstileToken(token)}
-            />
-          </div>
-        )}
+        <TurnstileWidget
+          key={turnstileResetKey.current}
+          onSuccess={(token) => setTurnstileToken(token)}
+        />
 
         <div className="flex items-center gap-2">
           <Checkbox

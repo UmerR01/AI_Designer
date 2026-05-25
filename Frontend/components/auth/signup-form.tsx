@@ -4,8 +4,7 @@ import Link from "next/link";
 import { useState, useRef } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
-import { Turnstile } from "@marsidev/react-turnstile";
-import type { TurnstileInstance } from "@marsidev/react-turnstile";
+import { TurnstileWidget } from "@/components/ui/turnstile-widget";
 import { postJson } from "@/lib/auth-api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,8 +15,7 @@ export function SignupFormView() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [turnstileToken, setTurnstileToken] = useState("");
-  const turnstileRef = useRef<TurnstileInstance>(null);
-  const siteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || "";
+  const turnstileResetKey = useRef(0);
 
   return (
     <AuthShell
@@ -78,12 +76,12 @@ export function SignupFormView() {
               recaptchaToken: turnstileToken, // API still uses the key recaptchaToken
             });
             toast.success("Account created. Please check your email to verify!");
-            turnstileRef.current?.reset();
+            turnstileResetKey.current += 1;
             setTurnstileToken("");
             form.reset();
           } catch (err: any) {
             toast.error(err?.detail ?? err?.message ?? "Sign up failed.");
-            turnstileRef.current?.reset();
+            turnstileResetKey.current += 1;
             setTurnstileToken("");
           } finally {
             setIsSubmitting(false);
@@ -150,15 +148,10 @@ export function SignupFormView() {
           </div>
         </div>
 
-        {siteKey && (
-          <div className="flex justify-center my-2">
-            <Turnstile
-              ref={turnstileRef}
-              siteKey={siteKey}
-              onSuccess={(token) => setTurnstileToken(token)}
-            />
-          </div>
-        )}
+        <TurnstileWidget
+          key={turnstileResetKey.current}
+          onSuccess={(token) => setTurnstileToken(token)}
+        />
 
         <Button
           type="submit"
