@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, Layout, Library, Megaphone, PenTool, Plus, Target, Trash2, LayoutGrid, Monitor, Smartphone, Package } from "lucide-react";
 import { toast } from "sonner";
@@ -25,6 +25,20 @@ import { useDesignerProjects } from "@/hooks/use-designer-projects";
 import { type DesignerProject, type ProjectKind } from "@/lib/designer-projects";
 
 export default function ProjectsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-[50vh] flex items-center justify-center text-sm text-muted-foreground">
+          Loading projects…
+        </div>
+      }
+    >
+      <ProjectsPageContent />
+    </Suspense>
+  );
+}
+
+function ProjectsPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const filterType = searchParams.get("filter");

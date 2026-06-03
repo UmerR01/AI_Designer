@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState, useRef } from "react";
+import { Suspense, useEffect, useMemo, useState, useRef } from "react";
 import {
   Bell,
   Folder,
@@ -114,7 +114,23 @@ function navItemActive(pathname: string | null, href: string): boolean {
   return pathname === href;
 }
 
+function AppShellFallback({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="relative min-h-[100dvh] bg-background text-foreground">
+      <main className="relative z-10">{children}</main>
+    </div>
+  );
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
+  return (
+    <Suspense fallback={<AppShellFallback>{children}</AppShellFallback>}>
+      <AppShellInner>{children}</AppShellInner>
+    </Suspense>
+  );
+}
+
+function AppShellInner({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
