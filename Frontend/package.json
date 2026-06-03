@@ -9,7 +9,9 @@
     "dev:turbo": "next dev --turbopack",
     "db:backfill:ui-designs": "node scripts/backfill-ui-designs-to-assets.mjs",
     "lint": "eslint .",
-    "start": "next start"
+    "start": "next start",
+    "validate:package": "node scripts/validate-package-json.mjs",
+    "preinstall": "node scripts/validate-package-json.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
