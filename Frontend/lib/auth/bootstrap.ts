@@ -1,13 +1,14 @@
 import { sql } from "@/lib/db";
- 
+import { ensureAppSchema } from "@/lib/db/ensure-app-schema";
+
 let authSchemaReady = false;
- 
+
 /**
- * Production safety net:
- * If migrations were skipped on a new Postgres deployment, ensure the core auth table exists.
+ * Production safety net when Alembic was not run: users + full app schema.
  */
 export async function ensureAuthSchema() {
   if (authSchemaReady) return;
+
   await sql()`
     create extension if not exists pgcrypto
   `;
@@ -23,7 +24,6 @@ export async function ensureAuthSchema() {
       created_at timestamptz not null default now()
     )
   `;
-  // Add column for existing tables
   await sql()`
     alter table users add column if not exists email_verified boolean not null default false;
   `;
@@ -32,5 +32,7 @@ export async function ensureAuthSchema() {
     on users(is_support_agent)
     where is_support_agent = true
   `;
+
+  await ensureAppSchema();
   authSchemaReady = true;
 }

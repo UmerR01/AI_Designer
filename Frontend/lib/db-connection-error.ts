@@ -39,5 +39,14 @@ export function dbConnectionErrorResponse(err: unknown): NextResponse | null {
       { status: 503 },
     );
   }
+  if (code === "42P01" || /relation .* does not exist/i.test(msg)) {
+    return NextResponse.json(
+      {
+        detail:
+          "Database schema is incomplete (missing tables). Restart the app after running: cd database && python manage.py upgrade",
+      },
+      { status: 503 },
+    );
+  }
   return null;
 }

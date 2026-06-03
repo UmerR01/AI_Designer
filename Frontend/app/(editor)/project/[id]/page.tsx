@@ -607,6 +607,9 @@ export default function ProjectEditorPage() {
   const [pendingHref, setPendingHref] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [projectRole, setProjectRole] = useState<ProjectRole | null>(null);
+  const isOwner = projectRole === "owner" || projectRole === null;
+  const isSharedEditor =
+    projectRole === "editor" || (sharedFromLink && projectRole !== "owner");
   const [me, setMe] = useState<MeResponse["user"]>(null);
   const [generatedUiImages, setGeneratedUiImages] = useState<GeneratedUiImage[]>([]);
   const [uiFlowGraph, setUiFlowGraph] = useState<UiFlowGraph | null>(null);
@@ -1139,8 +1142,6 @@ export default function ProjectEditorPage() {
   const filesLabel = sidebarFilesLabel(projectKind);
   const activeNode = useMemo(() => findNodeById(tree, activeId), [tree, activeId]);
   const showDesignerChat = useMemo(() => treeHasScreens(tree), [tree]);
-  const isOwner = projectRole === "owner" || projectRole === null;
-  const isSharedEditor = projectRole === "editor" || (sharedFromLink && projectRole !== "owner");
 
   useEffect(() => {
     const count = countScreensInTree(tree);

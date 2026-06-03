@@ -158,9 +158,14 @@ function ProjectsPageContent() {
 
   async function createProjectAndOpen(projectName: string, kindOverride?: ProjectKind) {
     const kind = kindOverride ?? createType ?? "landing page";
-    const p = await createProject(projectName, kind);
-    toast.success("Project created.");
-    router.push(`/project/${p.id}`);
+    try {
+      const p = await createProject(projectName, kind);
+      toast.success("Project created.");
+      router.push(`/project/${p.id}`);
+    } catch (e: unknown) {
+      const err = e as { detail?: string; message?: string };
+      toast.error(err?.detail ?? err?.message ?? "Could not create project. Check database setup.");
+    }
   }
 
   function confirmRename() {

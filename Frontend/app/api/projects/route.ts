@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/lib/auth/server";
 import { sql } from "@/lib/db";
+import { dbConnectionErrorResponse } from "@/lib/db-connection-error";
+import { ensureAppSchema, resetAppSchemaCache } from "@/lib/db/ensure-app-schema";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +13,14 @@ export async function GET(req: Request) {
 
   const user = await requireUser().catch(() => null);
   if (!user) return NextResponse.json({ detail: "Unauthorized." }, { status: 401 });
+
+  try {
+    await ensureAppSchema();
+  } catch (err: unknown) {
+    const r = dbConnectionErrorResponse(err);
+    if (r) return r;
+    throw err;
+  }
 
   // Lazy cleanup of projects deleted more than 30 days ago
   await sql()`
@@ -71,6 +81,24 @@ const CreateSchema = z.object({
   kind: z.string().min(1).max(50).optional(),
 });
 
+async function insertProject(
+  userId: string,
+  name: string,
+  kind: string | undefined,
+) {
+  return sql()<{
+    id: string;
+    name: string;
+    kind: string;
+    created_at: string;
+    updated_at: string;
+  }>`
+    insert into projects (owner_id, name, kind, data)
+    values (${userId}, ${name}, ${kind ?? "ui/ux design"}, ${JSON.stringify({})}::jsonb)
+    returning id, name, kind, created_at, updated_at
+  `;
+}
+
 export async function POST(req: Request) {
   const user = await requireUser().catch(() => null);
   if (!user) return NextResponse.json({ detail: "Unauthorized." }, { status: 401 });
@@ -81,6 +109,14 @@ export async function POST(req: Request) {
 
   const { name, kind } = parsed.data;
 
+  try {
+    await ensureAppSchema();
+  } catch (err: unknown) {
+    const r = dbConnectionErrorResponse(err);
+    if (r) return r;
+    throw err;
+  }
+
   let created: {
     id: string;
     name: string;
@@ -88,23 +124,39 @@ export async function POST(req: Request) {
     created_at: string;
     updated_at: string;
   }[] = [];
+
   try {
-    created = await sql()<{
-      id: string;
-      name: string;
-      kind: string;
-      created_at: string;
-      updated_at: string;
-    }>`
-      insert into projects (owner_id, name, kind, data)
-      values (${user.id}, ${name}, ${kind ?? "ui/ux design"}, ${JSON.stringify({})}::jsonb)
-      returning id, name, kind, created_at, updated_at
-    `;
-  } catch (e: any) {
-    if (e?.code === "23503") {
-      return NextResponse.json({ detail: "Session is stale after DB reset. Please log in again." }, { status: 401 });
+    created = await insertProject(user.id, name, kind);
+  } catch (e: unknown) {
+    const err = e as { code?: string; message?: string };
+    if (err?.code === "42P01") {
+      try {
+        resetAppSchemaCache();
+        await ensureAppSchema();
+        created = await insertProject(user.id, name, kind);
+      } catch (retryErr: unknown) {
+        const r = dbConnectionErrorResponse(retryErr);
+        if (r) return r;
+        throw retryErr;
+      }
+    } else if (err?.code === "23503") {
+      return NextResponse.json(
+        { detail: "Session is stale after DB reset. Please log in again." },
+        { status: 401 },
+      );
+    } else {
+      const r = dbConnectionErrorResponse(e);
+      if (r) return r;
+      console.error("[POST /api/projects]", e);
+      return NextResponse.json(
+        { detail: err?.message || "Could not create project." },
+        { status: 500 },
+      );
     }
-    throw e;
+  }
+
+  if (!created[0]) {
+    return NextResponse.json({ detail: "Could not create project." }, { status: 500 });
   }
 
   return NextResponse.json({ project: created[0] }, { status: 201 });

@@ -29,7 +29,6 @@ const nextConfig = {
     },
     proxyClientMaxBodySize: "200mb",
   },
-  middlewareClientMaxBodySize: "200mb",
 }
 
 export default nextConfig
