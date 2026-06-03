@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import {
   ChevronDown,
   ChevronRight,
@@ -25,11 +25,13 @@ import {
   Download,
   Share,
   LayoutGrid,
+  ArrowLeft,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { readDesignerProjects, type DesignerProject, type ProjectKind } from "@/lib/designer-projects";
-import { getJson, getMeCached, putJson } from "@/lib/auth-api";
+import { ApiError, getJson, getMeCached, postJson, putJson } from "@/lib/auth-api";
+import { loginUrlWithNext } from "@/lib/auth/login-redirect";
 import {
   addChildToFolder,
   defaultFrameForFolder,
@@ -37,7 +39,10 @@ import {
   EDITOR_FOLDER_UX_SCREENS,
   findNodeById,
   getEditorBootstrap,
+  isBlankStarterTree,
   isDefaultUiUxBootstrapTree,
+  countScreensInTree,
+  treeHasScreens,
   type EditorTreeNode,
   resolveProjectKind,
   setScreenFormatLabel,
@@ -45,6 +50,7 @@ import {
   RESOLUTIONS,
   removeNodeById,
   addSectionToScreen,
+  mapTree,
   renameNodeById,
   duplicateNodeById,
   convertToPx,
@@ -54,6 +60,40 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { UIDesignerEditorChatPanel } from "@/components/editor/ui-designer/UIDesignerEditorChatPanel";
+import {
+  UiPrototypeFlowPanel,
+  type FlowGalleryImage,
+} from "@/components/editor/ui-designer/UiPrototypeFlowPanel";
+import {
+  dedupeGeneratedImages,
+  hydrateLoadedGeneratedImages,
+  inferScreenLabelFromImage,
+  isLandingPagePrototypeImage,
+  landingPrototypeOwnerScreenId,
+  prototypeImagesSignature,
+  reconcileUploadedImages,
+  repairLandingPrototypeImageTags,
+  stripDataUrlsForProjectJson,
+} from "@/lib/generated-ui-images";
+import {
+  downloadImageAsFavicon,
+  downloadImageAsPng,
+  sanitizeDownloadBasename,
+  sanitizePngFilename,
+} from "@/lib/download-image";
+import { LOGO_PRESETS } from "@/lib/logo-presets";
+import { coercePersistedProjectData } from "@/lib/persisted-project-data";
+import type { ProjectRole } from "@/lib/projects/authz";
+import {
+  buildFlowGraphFromImages,
+  ensureFlowRelations,
+  flowGraphPersistenceKey,
+  mergeFlowGraphs,
+  orderFlowGalleryImages,
+  resolvePersistedFlowGraph,
+  supportsPrototypeFlow,
+  type UiFlowGraph,
+} from "@/lib/ui-flow-graph";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
@@ -102,6 +142,11 @@ type GeneratedUiImage = {
   filename: string;
   page_name?: string;
   created_at?: string;
+  nodeId?: string;
+  screenName?: string;
+  isAnchor?: boolean;
+  index?: number;
+  total?: number;
 };
 
 type PersistedEditorData = {
@@ -109,6 +154,7 @@ type PersistedEditorData = {
   activeId: string;
   openFolders: Record<string, boolean>;
   generatedUiImages?: GeneratedUiImage[];
+  uiFlowGraph?: UiFlowGraph | null;
 };
 
 function initials(first: string | undefined, last: string | undefined, email: string | undefined) {
@@ -119,22 +165,12 @@ function initials(first: string | undefined, last: string | undefined, email: st
 }
 
 function normalizePersistedEditorData(raw: unknown): PersistedEditorData | null {
-  if (!raw || typeof raw !== "object") return null;
-  const obj = raw as Record<string, unknown>;
-  if (!Array.isArray(obj.tree)) return null;
-  if (typeof obj.activeId !== "string") return null;
-  if (!obj.openFolders || typeof obj.openFolders !== "object") return null;
-
-  const generated = Array.isArray(obj.generatedUiImages)
-    ? (obj.generatedUiImages.filter((x) => x && typeof x === "object") as GeneratedUiImage[])
-    : [];
-
-  return {
-    tree: obj.tree as EditorTreeNode[],
-    activeId: obj.activeId,
-    openFolders: obj.openFolders as Record<string, boolean>,
-    generatedUiImages: generated,
-  };
+  const coerced = coercePersistedProjectData(raw);
+  if (!coerced.tree.length) {
+    if (!raw || typeof raw !== "object") return null;
+    if (!Array.isArray((raw as PersistedEditorData).tree)) return null;
+  }
+  return coerced;
 }
 
 function classifyGeneratedImage(img: GeneratedUiImage): "logo" | "mobile" | "poster" | "web" | "generic" {
@@ -151,27 +187,39 @@ function isImageOwnedByOtherScreen(
   currentScreenId: string,
   tree: EditorTreeNode[],
 ): boolean {
-  const name = img.page_name || "";
-  const match = name.match(/\[ScreenID:([^\]]+)\]/i);
+  const match = (img.page_name || "").match(/\[ScreenID:([^\]]+)\]/i);
   if (!match) return false;
   const ownerId = match[1];
   if (ownerId === currentScreenId) return false;
-
   const ownerScreen = findNodeById(tree, ownerId);
-  if (!ownerScreen || ownerScreen.kind !== "screen") return false;
+  return ownerScreen?.kind === "screen";
+}
 
-  const cleanName = name.replace(/\[ScreenID:[^\]]+\]/gi, "").trim().toLowerCase();
-  if (!cleanName || cleanName === "style guide" || cleanName === "brand logo" || cleanName === "illustration" || cleanName === "social post") {
-    return true;
+/** True when this generated image should render on the given screen artboard. */
+function imageBelongsToScreen(
+  img: GeneratedUiImage,
+  screenId: string,
+  tree: EditorTreeNode[],
+): boolean {
+  const name = img.page_name || "";
+  const tagMatch = name.match(/\[ScreenID:([^\]]+)\]/i);
+  if (tagMatch) return tagMatch[1] === screenId;
+
+  if (isImageOwnedByOtherScreen(img, screenId, tree)) return false;
+
+  const screen = findNodeById(tree, screenId);
+  if (!screen || screen.kind !== "screen") return false;
+
+  if (isLandingPagePrototypeImage(img)) {
+    return landingPrototypeOwnerScreenId(img, tree) === screenId;
   }
 
-  const ownerName = (ownerScreen.name || "").toLowerCase();
-  const isUntitled = ownerName === "untitled" || ownerName.startsWith("untitled ");
-  if (!isUntitled && (cleanName.includes(ownerName) || ownerName.includes(cleanName))) {
-    return true;
-  }
+  const screenName = (screen.name || "").toLowerCase();
+  const isUntitled = screenName === "untitled" || screenName.startsWith("untitled ");
+  if (isUntitled) return false;
 
-  return false;
+  const hay = `${img.page_name ?? ""} ${img.filename ?? ""}`.toLowerCase();
+  return Boolean(screenName && hay.includes(screenName));
 }
 
 function pickImageForSection(
@@ -193,6 +241,13 @@ function pickImageForSection(
     return name.includes(sectionIdTag) || name === sec.id;
   });
   if (directBySectionId) return directBySectionId;
+
+  const directByScreenNameOnSection = sorted.find((img) => {
+    const label = (img.screenName || "").trim().toLowerCase();
+    if (!label) return false;
+    return label === (sec.name || "").trim().toLowerCase();
+  });
+  if (directByScreenNameOnSection) return directByScreenNameOnSection;
 
   // 2. Match by explicit Screen ID tag in page_name
   const screenIdTag = `[ScreenID:${screen.id}]`;
@@ -248,26 +303,60 @@ function pickImageForSection(
     }
   }
 
+  // Landing page: tagged screen, or legacy untagged image on the first artboard only.
+  if (idx === 0) {
+    const landingPrototype = sorted.find((img) => {
+      if (!isLandingPagePrototypeImage(img)) return false;
+      return landingPrototypeOwnerScreenId(img, tree) === screen.id;
+    });
+    if (landingPrototype) return landingPrototype;
+  }
+
   return null;
 }
 
-function dedupeGeneratedImages(images: GeneratedUiImage[]): GeneratedUiImage[] {
-  const map = new Map<string, GeneratedUiImage>();
-  for (const img of images) {
-    const key = img.id || img.url || img.filename;
-    if (!key) continue;
-    const prev = map.get(key);
-    if (!prev) {
-      map.set(key, img);
-      continue;
-    }
-    const prevAt = prev.created_at || "";
-    const nextAt = img.created_at || "";
-    if (nextAt.localeCompare(prevAt) >= 0) {
-      map.set(key, img);
-    }
-  }
-  return Array.from(map.values()).sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+function inferPrototypeAnchor(
+  img: GeneratedUiImage,
+  flow: UiFlowGraph | null | undefined,
+): boolean {
+  if (img.isAnchor) return true;
+  if (!flow?.nodes?.length) return false;
+  const firstNode = [...flow.nodes].sort(
+    (a, b) => (a.order ?? 999) - (b.order ?? 999),
+  )[0];
+  if (!firstNode) return false;
+  const label = (img.screenName || img.page_name || "")
+    .replace(/\[SectionID:[^\]]+\]\s*/gi, "")
+    .trim()
+    .toLowerCase();
+  return label === (firstNode.screen || "").trim().toLowerCase();
+}
+
+function enrichPrototypeImageMetadata(
+  images: GeneratedUiImage[],
+  flow: UiFlowGraph | null | undefined,
+): GeneratedUiImage[] {
+  if (!flow?.nodes?.length) return images;
+  const total = flow.nodes.length;
+  return images.map((img) => {
+    const isAnchor = inferPrototypeAnchor(img, flow);
+    const label = inferScreenLabelFromImage(img);
+    const node =
+      flow.nodes.find((n) => n.id === img.nodeId) ||
+      flow.nodes.find(
+        (n) =>
+          (n.screen || "").trim().toLowerCase() ===
+          (img.screenName || label || "").trim().toLowerCase(),
+      );
+    return {
+      ...img,
+      isAnchor,
+      nodeId: img.nodeId || node?.id,
+      screenName: img.screenName || node?.screen || label,
+      index: node?.order ?? img.index,
+      total: img.total ?? total,
+    };
+  });
 }
 
 function normalizePracticeTreeFlat(tree: EditorTreeNode[]) {
@@ -280,9 +369,13 @@ function normalizePracticeTreeFlat(tree: EditorTreeNode[]) {
   return merged;
 }
 
+const SHARED_EXIT_BLOCKED = new Set(["/projects", "/dashboard", "/"]);
+
 export default function ProjectEditorPage() {
   const params = useParams<{ id: string }>();
+  const searchParams = useSearchParams();
   const projectId = params?.id ?? "";
+  const sharedFromLink = searchParams.get("shared") === "1";
 
   const [projectMeta, setProjectMeta] = useState<DesignerProject | null>(null);
   const projectKind = resolveProjectKind(projectMeta?.kind);
@@ -292,6 +385,8 @@ export default function ProjectEditorPage() {
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
   const [hydrated, setHydrated] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [presetPickerOpen, setPresetPickerOpen] = useState(false);
+  const prevScreenCountRef = useRef(0);
 
   // Customizable Artboard Sizing Modal State
   const [sizeModalOpen, setSizeModalOpen] = useState(false);
@@ -302,6 +397,7 @@ export default function ProjectEditorPage() {
 
   // Viewport Scaling State
   const workspaceRef = useRef<HTMLDivElement>(null);
+  const lastChatImagesSigRef = useRef("");
   const [zoomScale, setZoomScale] = useState(1);
   const clampZoom = (v: number) => Math.max(0.2, Math.min(3, v));
 
@@ -313,9 +409,17 @@ export default function ProjectEditorPage() {
       let resolvedMeta: DesignerProject | null = localMeta;
 
       try {
-        const res = await getJson<{ project: { id: string; name: string; kind: string } }>(
-          `/api/projects/${projectId}`,
-        );
+        const res = await getJson<{
+          project: { id: string; name: string; kind: string };
+          role: ProjectRole;
+        }>(`/api/projects/${projectId}`);
+        if (!cancelled) {
+          setProjectRole(res.role ?? null);
+          if (res.role === "viewer") {
+            window.location.replace(`/view/${projectId}`);
+            return;
+          }
+        }
         const found = res.project
           ? ({
             id: res.project.id,
@@ -329,10 +433,21 @@ export default function ProjectEditorPage() {
           resolvedMeta = found ?? localMeta;
           setProjectMeta(found ?? localMeta);
         }
-      } catch {
+      } catch (e) {
         if (!cancelled) {
+          if (e instanceof ApiError && e.status === 401) {
+            const returnPath = `/project/${projectId}${sharedFromLink ? "?shared=1" : ""}`;
+            window.location.replace(loginUrlWithNext(returnPath));
+            return;
+          }
+          if (e instanceof ApiError && (e.status === 403 || e.status === 404)) {
+            toast.error("Sign in or use the share link you were given to access this project.");
+            window.location.replace(loginUrlWithNext(`/project/${projectId}?shared=1`));
+            return;
+          }
           resolvedMeta = localMeta;
           setProjectMeta(localMeta);
+          setProjectRole(null);
         }
       }
 
@@ -377,13 +492,46 @@ export default function ProjectEditorPage() {
         assetsFromDb = [];
       }
 
-      const mergedServerImages = dedupeGeneratedImages([
-        ...(remoteParsedData?.generatedUiImages ?? []),
-        ...assetsFromDb,
-      ]);
+      const hydratedDbAssets = hydrateLoadedGeneratedImages(assetsFromDb);
+      const projectImageMeta = hydrateLoadedGeneratedImages(
+        dedupeGeneratedImages([
+          ...(remoteParsedData?.generatedUiImages ?? []),
+          ...(localParsedData?.generatedUiImages ?? []),
+        ]),
+        hydratedDbAssets,
+      );
+      const mergedServerImages = dedupeGeneratedImages(
+        hydratedDbAssets.length
+          ? reconcileUploadedImages(projectImageMeta, hydratedDbAssets)
+          : projectImageMeta,
+      );
 
-      // Keep local draft only for structure convenience, never as authoritative image source.
-      const parsedData = localParsedData ?? remoteParsedData;
+      const remoteSavedAt = (remoteParsedData as { savedAt?: string } | null)?.savedAt;
+      const localSavedAt = (localParsedData as { savedAt?: string } | null)?.savedAt;
+      const remoteIsNewer =
+        remoteSavedAt &&
+        (!localSavedAt || remoteSavedAt.localeCompare(localSavedAt) >= 0);
+
+      const parsedData =
+        remoteIsNewer && remoteParsedData
+          ? { ...localParsedData, ...remoteParsedData }
+          : localParsedData ?? remoteParsedData;
+
+      let restoredFlowGraph = ensureFlowRelations(
+        remoteParsedData?.uiFlowGraph ?? localParsedData?.uiFlowGraph ?? null,
+      );
+      const flowFromImages = buildFlowGraphFromImages(mergedServerImages);
+      if (flowFromImages) {
+        restoredFlowGraph = ensureFlowRelations(
+          mergeFlowGraphs(restoredFlowGraph, flowFromImages),
+        );
+      }
+
+      const imagesWithMeta = enrichPrototypeImageMetadata(
+        hydrateLoadedGeneratedImages(mergedServerImages, hydratedDbAssets),
+        restoredFlowGraph,
+      );
+
       if (parsedData) {
         let { tree, activeId, openFolders } = parsedData;
         // Previously we bootstrapped as ui/ux before API kind arrived; fix stale default trees for website projects.
@@ -405,14 +553,33 @@ export default function ProjectEditorPage() {
           }
         }
 
+        if (imagesWithMeta.length === 0 && isBlankStarterTree(tree)) {
+          tree = [];
+          activeId = "";
+          openFolders = {};
+        }
+
+        const imagesForEditor =
+          kind === "landing page"
+            ? repairLandingPrototypeImageTags(imagesWithMeta, tree)
+            : imagesWithMeta;
+
         setTree(tree);
         setActiveId(activeId);
         setOpenFolders(openFolders);
-        setGeneratedUiImages(mergedServerImages);
+        setGeneratedUiImages(imagesForEditor);
+        setUiFlowGraph(restoredFlowGraph);
+        lastChatImagesSigRef.current = prototypeImagesSignature(imagesForEditor);
         if (draft && draft !== saved) setIsDirty(true);
       } else {
         applyBootstrap();
-        setGeneratedUiImages(mergedServerImages);
+        const bootImages =
+          kind === "landing page"
+            ? repairLandingPrototypeImageTags(imagesWithMeta, getEditorBootstrap(kind).tree)
+            : imagesWithMeta;
+        setGeneratedUiImages(bootImages);
+        setUiFlowGraph(restoredFlowGraph);
+        lastChatImagesSigRef.current = prototypeImagesSignature(bootImages);
       }
       setHydrated(true);
     })();
@@ -422,6 +589,15 @@ export default function ProjectEditorPage() {
     };
   }, [projectId]);
 
+  // Re-attach legacy landing prototypes (saved without [ScreenID:…]) to the first artboard.
+  useEffect(() => {
+    if (!hydrated || projectKind !== "landing page") return;
+    setGeneratedUiImages((prev) => {
+      const next = repairLandingPrototypeImageTags(prev, tree);
+      return prototypeImagesSignature(prev) === prototypeImagesSignature(next) ? prev : next;
+    });
+  }, [hydrated, projectKind, tree]);
+
   const [isDirty, setIsDirty] = useState(false);
   const isFirstRender = useRef(true);
   const dirtyRef = useRef(false);
@@ -430,42 +606,232 @@ export default function ProjectEditorPage() {
   const [showExitModal, setShowExitModal] = useState(false);
   const [pendingHref, setPendingHref] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
+  const [projectRole, setProjectRole] = useState<ProjectRole | null>(null);
   const [me, setMe] = useState<MeResponse["user"]>(null);
   const [generatedUiImages, setGeneratedUiImages] = useState<GeneratedUiImage[]>([]);
-  const mergeGeneratedUiImages = useCallback((incoming: GeneratedUiImage[]) => {
-    if (!Array.isArray(incoming)) return;
-    if (incoming.length === 0) {
-      setGeneratedUiImages([]);
-      return;
-    }
-    setGeneratedUiImages((prev) => {
-      const merged = dedupeGeneratedImages([...prev, ...incoming]);
-      if (merged.length === prev.length) {
-        let same = true;
-        for (let i = 0; i < merged.length; i++) {
-          const a = merged[i];
-          const b = prev[i];
-          if (
-            !b ||
-            a.id !== b.id ||
-            a.url !== b.url ||
-            a.filename !== b.filename ||
-            a.page_name !== b.page_name ||
-            a.created_at !== b.created_at
-          ) {
-            same = false;
-            break;
-          }
-        }
-        if (same) return prev;
+  const [uiFlowGraph, setUiFlowGraph] = useState<UiFlowGraph | null>(null);
+  const prototypeSectionMapRef = useRef<Map<string, string>>(new Map());
+  const restoredPrototypeSectionsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    prototypeSectionMapRef.current = new Map();
+    restoredPrototypeSectionsRef.current = new Set();
+  }, [projectId]);
+
+  const resolveEditorScreenId = useCallback(
+    (treeNodes: EditorTreeNode[], preferredId: string): string | null => {
+      const node = findNodeById(treeNodes, preferredId);
+      if (!node) return null;
+      if (node.kind === "screen") return node.id;
+      if (node.kind === "folder" && node.children?.length) {
+        const firstScreen = node.children.find((c) => c.kind === "screen");
+        return firstScreen?.id ?? null;
       }
-      return merged;
+      return null;
+    },
+    [],
+  );
+
+  const ensurePrototypeSection = useCallback(
+    (info: { screenName: string; nodeId?: string }): string | null => {
+      if (!supportsPrototypeFlow(projectKind)) return null;
+      const label = (info.screenName || "Screen").trim() || "Screen";
+      const mapKey = (info.nodeId || label).toLowerCase();
+
+      const cached = prototypeSectionMapRef.current.get(mapKey);
+      if (cached) return cached;
+
+      let screenId = resolveEditorScreenId(tree, activeId);
+      if (!screenId) {
+        const newScreenId = crypto.randomUUID();
+        const newSectionId = crypto.randomUUID();
+        const frame = projectKind === "product design - app" ? "mobile" : "desktop";
+        prototypeSectionMapRef.current.set(mapKey, newSectionId);
+        setTree((prev) => [
+          ...prev,
+          {
+            id: newScreenId,
+            kind: "screen",
+            name: "Untitled",
+            frame,
+            sections: [{ id: newSectionId, name: label }],
+            expansionDirection: "vertical",
+          },
+        ]);
+        setActiveId(newScreenId);
+        return newSectionId;
+      }
+
+      const screenNode = findNodeById(tree, screenId);
+      if (!screenNode || screenNode.kind !== "screen") return null;
+
+      const sections = screenNode.sections ?? [];
+      const existingByName = sections.find(
+        (s) => (s.name || "").trim().toLowerCase() === label.toLowerCase(),
+      );
+      if (existingByName) {
+        prototypeSectionMapRef.current.set(mapKey, existingByName.id);
+        return existingByName.id;
+      }
+
+      const hasSectionImage = (sectionId: string) =>
+        generatedUiImages.some((img) =>
+          (img.page_name || "").includes(`[SectionID:${sectionId}]`),
+        );
+
+      const onlyDefaultSection =
+        sections.length === 1 &&
+        /^first section$/i.test(sections[0].name || "") &&
+        !hasSectionImage(sections[0].id);
+
+      if (onlyDefaultSection) {
+        const sectionId = sections[0].id;
+        prototypeSectionMapRef.current.set(mapKey, sectionId);
+        setTree((prev) =>
+          mapTree(prev, (n) => {
+            if (n.kind !== "screen" || n.id !== screenId) return n;
+            return {
+              ...n,
+              sections: (n.sections ?? []).map((s) =>
+                s.id === sectionId ? { ...s, name: label } : s,
+              ),
+            };
+          }),
+        );
+        return sectionId;
+      }
+
+      const newSectionId = crypto.randomUUID();
+      prototypeSectionMapRef.current.set(mapKey, newSectionId);
+      setTree((prev) =>
+        mapTree(prev, (n) => {
+          if (n.kind !== "screen" || n.id !== screenId) return n;
+          return {
+            ...n,
+            sections: [...(n.sections ?? []), { id: newSectionId, name: label }],
+          };
+        }),
+      );
+      return newSectionId;
+    },
+    [activeId, tree, projectKind, generatedUiImages, resolveEditorScreenId],
+  );
+
+  /** Chat is source of truth while generating — replace with latest full image list. */
+  const syncImagesFromChat = useCallback(
+    (incoming: GeneratedUiImage[]) => {
+      if (!Array.isArray(incoming) || incoming.length === 0) return;
+      let list = incoming;
+      if (projectKind === "landing page") {
+        list = repairLandingPrototypeImageTags(list, tree);
+      }
+      if (supportsPrototypeFlow(projectKind)) {
+        for (const img of list) {
+          const label = inferScreenLabelFromImage(img);
+          if (!label) continue;
+          if (String(img.page_name || "").toLowerCase().includes("style guide")) continue;
+          ensurePrototypeSection({ screenName: label, nodeId: img.nodeId });
+        }
+      }
+      setGeneratedUiImages((prev) => {
+        const next = dedupeGeneratedImages(
+          enrichPrototypeImageMetadata(list, uiFlowGraph),
+        );
+        const nextSig = prototypeImagesSignature(next);
+        if (prototypeImagesSignature(prev) === nextSig) return prev;
+        lastChatImagesSigRef.current = nextSig;
+        return next;
+      });
+      const rebuilt = buildFlowGraphFromImages(list);
+      if (rebuilt?.nodes?.length) {
+        setUiFlowGraph((prev) => mergeFlowGraphs(prev, rebuilt) ?? rebuilt);
+        setIsDirty(true);
+        dirtyRef.current = true;
+      }
+    },
+    [uiFlowGraph, projectKind, ensurePrototypeSection, tree],
+  );
+
+  const applyFlowGraph = useCallback((incoming: UiFlowGraph | null) => {
+    setUiFlowGraph((prevGraph) => {
+      const merged = mergeFlowGraphs(prevGraph, incoming);
+      const resolved = ensureFlowRelations(merged);
+      setGeneratedUiImages((prevImages) => {
+        if (!resolved?.nodes?.length || prevImages.length === 0) return prevImages;
+        const next = dedupeGeneratedImages(
+          enrichPrototypeImageMetadata(prevImages, resolved),
+        );
+        const nextSig = prototypeImagesSignature(next);
+        if (prototypeImagesSignature(prevImages) === nextSig) return prevImages;
+        lastChatImagesSigRef.current = nextSig;
+        return next;
+      });
+      if (resolved?.nodes?.length) {
+        setIsDirty(true);
+        dirtyRef.current = true;
+      }
+      return resolved;
     });
   }, []);
+
+  const uploadImagesToServer = useCallback(
+    async (images: GeneratedUiImage[], flow: UiFlowGraph | null) => {
+      if (!projectId || images.length === 0) return images;
+
+      const screens = images.filter(
+        (img) => !String(img.page_name || "").toLowerCase().includes("style guide"),
+      );
+
+      for (const img of screens) {
+        try {
+          await postJson(`/api/projects/${projectId}/assets`, {
+            source: "ui-designer",
+            images: [img],
+            uiFlowGraph: resolvePersistedFlowGraph(flow, images),
+          });
+        } catch (e) {
+          console.warn("[project] asset upload failed for", img.screenName || img.id, e);
+        }
+      }
+
+      try {
+        const res = await getJson<{ images?: GeneratedUiImage[] }>(
+          `/api/projects/${projectId}/assets`,
+        );
+        if (res.images?.length) {
+          return reconcileUploadedImages(images, res.images);
+        }
+      } catch (e) {
+        console.warn("[project] could not reload assets after upload", e);
+      }
+
+      return images;
+    },
+    [projectId],
+  );
+
+  // Restore artboard sections for each saved prototype screen after reload.
+  useEffect(() => {
+    if (!hydrated || !supportsPrototypeFlow(projectKind)) return;
+    const sorted = [...generatedUiImages].sort(
+      (a, b) => (a.index ?? 999) - (b.index ?? 999),
+    );
+    for (const img of sorted) {
+      const label = inferScreenLabelFromImage(img);
+      if (!label) continue;
+      if (String(img.page_name || "").toLowerCase().includes("style guide")) continue;
+      const key = (img.nodeId || label).toLowerCase();
+      if (restoredPrototypeSectionsRef.current.has(key)) continue;
+      restoredPrototypeSectionsRef.current.add(key);
+      ensurePrototypeSection({ screenName: label, nodeId: img.nodeId });
+    }
+  }, [hydrated, generatedUiImages, projectKind, ensurePrototypeSection]);
 
   const [isSaving, setIsSaving] = useState(false);
   const [brokenImageKeys, setBrokenImageKeys] = useState<Record<string, boolean>>({});
   const lastAutoSyncedImagesRef = useRef<string>("");
+  const persistInFlightRef = useRef(false);
+  const persistBackoffUntilRef = useRef(0);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
 
@@ -494,7 +860,7 @@ export default function ProjectEditorPage() {
     }
     setIsDirty(true);
     dirtyRef.current = true;
-  }, [tree, generatedUiImages, hydrated]);
+  }, [tree, generatedUiImages, uiFlowGraph, hydrated]);
 
   // History Interceptor (The "Strict Lock")
   useEffect(() => {
@@ -503,6 +869,10 @@ export default function ProjectEditorPage() {
     const handlePopState = (e: PopStateEvent) => {
       if (isCleaningUpRef.current) return;
       window.history.pushState(null, "", window.location.href);
+      if (isSharedEditor) {
+        window.history.pushState(null, "", window.location.href);
+        return;
+      }
       setPendingHref("/projects");
       setShowExitModal(true);
     };
@@ -510,7 +880,7 @@ export default function ProjectEditorPage() {
     window.history.pushState(null, "", window.location.href);
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, [isDirty]);
+  }, [isDirty, isSharedEditor]);
 
   // Tab Close Guard (Bulletproof Ref-Based)
   useEffect(() => {
@@ -525,19 +895,72 @@ export default function ProjectEditorPage() {
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, []);
 
-  function buildPersistedEditorData(): PersistedEditorData {
-    return { tree, activeId, openFolders, generatedUiImages };
+  function buildPersistedEditorData(
+    images: GeneratedUiImage[] = generatedUiImages,
+    forServer = false,
+    flowOverride?: UiFlowGraph | null,
+  ): PersistedEditorData {
+    const storedImages = forServer ? stripDataUrlsForProjectJson(images) : images;
+    const flowToSave = resolvePersistedFlowGraph(
+      flowOverride ?? uiFlowGraph,
+      storedImages,
+    );
+    return {
+      tree,
+      activeId,
+      openFolders,
+      generatedUiImages: storedImages,
+      uiFlowGraph: flowToSave,
+      savedAt: new Date().toISOString(),
+    };
   }
 
   async function persistProjectData() {
+    if (persistInFlightRef.current) return;
+    if (Date.now() < persistBackoffUntilRef.current) return;
+
+    persistInFlightRef.current = true;
     const storageKey = `${STORAGE_PREFIX}${projectId}`;
-    const payload = buildPersistedEditorData();
     try {
-      localStorage.setItem(storageKey, JSON.stringify(payload));
+      let images = enrichPrototypeImageMetadata(generatedUiImages, uiFlowGraph);
+      if (images.length > 0) {
+        images = enrichPrototypeImageMetadata(
+          await uploadImagesToServer(images, uiFlowGraph),
+          uiFlowGraph,
+        );
+        setGeneratedUiImages(images);
+        lastChatImagesSigRef.current = prototypeImagesSignature(images);
+      }
+      const flowToSave = resolvePersistedFlowGraph(uiFlowGraph, images);
+      if (flowToSave && (uiFlowGraph?.nodes?.length ?? 0) < 2) {
+        setUiFlowGraph(flowToSave);
+      }
+      const payload = buildPersistedEditorData(images, true, flowToSave);
+      try {
+        const localPayload = buildPersistedEditorData(images, false);
+        localStorage.setItem(storageKey, JSON.stringify(localPayload));
+        localStorage.setItem(
+          `draft.${STORAGE_PREFIX}${projectId}`,
+          JSON.stringify(localPayload),
+        );
+      } catch (e) {
+        console.warn("localStorage quota exceeded for project save", e);
+      }
+      await putJson<{ ok: boolean }>(`/api/projects/${projectId}/data`, { data: payload });
+      lastAutoSyncedImagesRef.current = [
+        images
+          .map((i) => i.id)
+          .sort()
+          .join("|"),
+        flowGraphPersistenceKey(flowToSave),
+        tree.length,
+      ].join("::");
     } catch (e) {
-      console.warn("localStorage quota exceeded for project save", e);
+      persistBackoffUntilRef.current = Date.now() + 30_000;
+      throw e;
+    } finally {
+      persistInFlightRef.current = false;
     }
-    await putJson<{ ok: boolean }>(`/api/projects/${projectId}/data`, { data: payload });
   }
 
   async function handleSaveProject() {
@@ -570,31 +993,30 @@ export default function ProjectEditorPage() {
       }
     }, 1000);
     return () => clearTimeout(timeout);
-  }, [tree, activeId, openFolders, generatedUiImages, hydrated, projectId]);
+  }, [tree, activeId, openFolders, generatedUiImages, uiFlowGraph, hydrated, projectId]);
 
-  // Auto-sync generated designs to server so reopen always restores them.
-  // This runs in background and does not replace explicit "Save" UX.
+  // Auto-sync: upload images to project_assets, then save project JSON (incl. uiFlowGraph).
   useEffect(() => {
     if (!hydrated || !projectId || generatedUiImages.length === 0) return;
-    const signature = JSON.stringify(
+    const signature = [
       generatedUiImages
-        .map((i) => ({ id: i.id, url: i.url, filename: i.filename, page_name: i.page_name, created_at: i.created_at }))
-        .sort((a, b) => (a.id || "").localeCompare(b.id || "")),
-    );
+        .map((i) => i.id)
+        .sort()
+        .join("|"),
+      flowGraphPersistenceKey(
+        resolvePersistedFlowGraph(uiFlowGraph, generatedUiImages),
+      ),
+      tree.length,
+    ].join("::");
     if (signature === lastAutoSyncedImagesRef.current) return;
 
     const timeout = window.setTimeout(() => {
-      const payload = buildPersistedEditorData();
-      void putJson<{ ok: boolean }>(`/api/projects/${projectId}/data`, { data: payload })
-        .then(() => {
-          lastAutoSyncedImagesRef.current = signature;
-        })
-        .catch(() => {
-          // Keep silent; manual save remains available and local draft still exists.
-        });
-    }, 900);
+      void persistProjectData().catch((e: unknown) => {
+        console.warn("[project] auto-save failed", e);
+      });
+    }, 1500);
     return () => window.clearTimeout(timeout);
-  }, [generatedUiImages, hydrated, projectId, tree, activeId, openFolders]);
+  }, [generatedUiImages, uiFlowGraph, hydrated, projectId, tree, activeId, openFolders]);
 
   function handleDiscardAndExit() {
     isCleaningUpRef.current = true;
@@ -617,13 +1039,12 @@ export default function ProjectEditorPage() {
     }
   }
 
-  function handleDownloadProject() {
-    if (!projectId) return;
-    window.location.href = `/api/projects/${projectId}/download`;
-  }
-
   // Internal Navigation Security
   function handleSafeNavigate(href: string) {
+    if (isSharedEditor && SHARED_EXIT_BLOCKED.has(href)) {
+      toast.message("This project was shared with you for editing only.");
+      return;
+    }
     if (isDirty) {
       setPendingHref(href);
       setShowExitModal(true);
@@ -717,6 +1138,17 @@ export default function ProjectEditorPage() {
 
   const filesLabel = sidebarFilesLabel(projectKind);
   const activeNode = useMemo(() => findNodeById(tree, activeId), [tree, activeId]);
+  const showDesignerChat = useMemo(() => treeHasScreens(tree), [tree]);
+  const isOwner = projectRole === "owner" || projectRole === null;
+  const isSharedEditor = projectRole === "editor" || (sharedFromLink && projectRole !== "owner");
+
+  useEffect(() => {
+    const count = countScreensInTree(tree);
+    if (prevScreenCountRef.current === 0 && count > 0) {
+      setIsSidebarCollapsed(false);
+    }
+    prevScreenCountRef.current = count;
+  }, [tree]);
   const latestGeneratedUiImage = useMemo(() => {
     if (!generatedUiImages.length) return null;
     return generatedUiImages
@@ -724,15 +1156,85 @@ export default function ProjectEditorPage() {
       .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))[0];
   }, [generatedUiImages]);
 
+  const prototypeScreenCount = generatedUiImages.filter(
+    (img) => !String(img.page_name || "").toLowerCase().includes("style guide"),
+  ).length;
+
+  /** Multi-page sites tag images with [SectionID:…]; use same matching as the canvas. */
+  const activeScreenHasPrototypeImages = useMemo(() => {
+    if (!activeId || activeNode?.kind !== "screen") return false;
+    const screen = activeNode;
+    const sections = screen.sections ?? [{ id: "base", name: "Base" }];
+    return sections.some((sec, idx) =>
+      Boolean(pickImageForSection(screen, sec, idx, generatedUiImages, tree)),
+    );
+  }, [generatedUiImages, activeId, activeNode, tree]);
+
+  const displayFlowGraph = useMemo(() => {
+    const fromState = ensureFlowRelations(uiFlowGraph);
+    if ((fromState?.nodes?.length ?? 0) >= 2) return fromState;
+    return ensureFlowRelations(buildFlowGraphFromImages(generatedUiImages));
+  }, [uiFlowGraph, generatedUiImages]);
+
+  const flowGalleryImages = useMemo((): FlowGalleryImage[] => {
+    const flowNodeNames = new Set(
+      (displayFlowGraph?.nodes ?? uiFlowGraph?.nodes ?? [])
+        .map((n) => (n.screen || "").trim().toLowerCase())
+        .filter(Boolean),
+    );
+    const candidates = generatedUiImages
+      .filter((img) => {
+        if (img.nodeId || img.screenName) return true;
+        const label = inferScreenLabelFromImage(img)?.toLowerCase() ?? "";
+        if (!label || label.includes("style guide")) return false;
+        return [...flowNodeNames].some(
+          (name) => label.includes(name) || name.includes(label),
+        );
+      })
+      .map((img) => ({
+        id: img.id,
+        url: img.url,
+        filename: img.filename,
+        page_name: img.page_name,
+        nodeId: img.nodeId,
+        screenName: img.screenName || inferScreenLabelFromImage(img),
+        isAnchor: img.isAnchor,
+        index: img.index,
+        total: img.total,
+        created_at: img.created_at,
+      }));
+
+    return orderFlowGalleryImages(displayFlowGraph, candidates);
+  }, [generatedUiImages, uiFlowGraph, displayFlowGraph]);
+
+  const showPrototypeFlow =
+    supportsPrototypeFlow(projectKind) &&
+    !!displayFlowGraph &&
+    (displayFlowGraph.nodes?.length ?? 0) >= 2 &&
+    prototypeScreenCount >= 2 &&
+    activeScreenHasPrototypeImages;
+
+  // Keep uiFlowGraph in state when only images were persisted (reopen / partial save).
+  useEffect(() => {
+    if (!hydrated || !supportsPrototypeFlow(projectKind)) return;
+    const fromImages = ensureFlowRelations(buildFlowGraphFromImages(generatedUiImages));
+    if (!fromImages || (fromImages.nodes?.length ?? 0) < 2) return;
+    setUiFlowGraph((prev) => {
+      const merged = mergeFlowGraphs(prev, fromImages) ?? fromImages;
+      if (flowGraphPersistenceKey(prev) === flowGraphPersistenceKey(merged)) return prev;
+      setIsDirty(true);
+      dirtyRef.current = true;
+      return merged;
+    });
+  }, [hydrated, projectKind, generatedUiImages]);
+
   function handleFolderAdd(folderId: string, customName?: string, formatLabel?: string) {
     const folder = findNodeById(tree, folderId);
     if (!folder || folder.kind !== "folder") return;
 
-    const needsPrompt = (
+    const needsPrompt =
       projectKind === "product design - packaging" ||
-      projectKind === "logo design" ||
-      projectKind === "social media design"
-    );
+      projectKind === "social media design";
 
     if (needsPrompt) {
       let defaultW = "1080";
@@ -741,9 +1243,6 @@ export default function ProjectEditorPage() {
       if (projectKind === "product design - packaging") {
         defaultW = "1200";
         defaultH = "1200";
-      } else if (projectKind === "logo design") {
-        defaultW = "800";
-        defaultH = "800";
       }
       setCustomWidth(defaultW);
       setCustomHeight(defaultH);
@@ -794,13 +1293,10 @@ export default function ProjectEditorPage() {
   function handleHeaderPlus(isFromChat: boolean | any = false): string {
     const isChat = isFromChat === true;
 
-    const needsPrompt = (
-      !isChat && (
-        projectKind === "product design - packaging" ||
-        projectKind === "logo design" ||
-        projectKind === "social media design"
-      )
-    );
+    const needsPrompt =
+      !isChat &&
+      (projectKind === "product design - packaging" ||
+        projectKind === "social media design");
 
     if (needsPrompt) {
       let defaultW = "1080";
@@ -809,9 +1305,6 @@ export default function ProjectEditorPage() {
       if (projectKind === "product design - packaging") {
         defaultW = "1200";
         defaultH = "1200";
-      } else if (projectKind === "logo design") {
-        defaultW = "800";
-        defaultH = "800";
       }
       setCustomWidth(defaultW);
       setCustomHeight(defaultH);
@@ -821,9 +1314,14 @@ export default function ProjectEditorPage() {
       return "";
     }
 
-    if (projectKind === "social media design" && !isChat) {
+    if ((projectKind === "social media design" || projectKind === "logo design") && !isChat) {
+      setPresetPickerOpen(true);
       setActiveId("");
-      toast.info("Select a preset to add a new screen.");
+      toast.info(
+        projectKind === "logo design"
+          ? "Select a logo preset to add an artboard."
+          : "Select a preset to add a new screen.",
+      );
       return "";
     }
 
@@ -843,6 +1341,7 @@ export default function ProjectEditorPage() {
       };
       setTree((prev) => [...prev, child]);
       setActiveId(newId);
+      setPresetPickerOpen(false);
       setRenamingId(newId);
       setRenameDraft("Untitled");
       toast.success(isSocial ? "Asset added." : "Screen added.");
@@ -874,17 +1373,22 @@ export default function ProjectEditorPage() {
 
     const newId = crypto.randomUUID();
     const isSocial = projectKind === "social media design";
-    const prefix = projectKind === "logo design" ? "Artboard" : "Asset";
-    const name = `${prefix} ${tree.length + 1}`;
+    const isLogo = projectKind === "logo design";
     const child: EditorTreeNode = {
       id: newId,
       kind: "screen",
-      name,
+      name: isLogo || isSocial ? "Untitled" : `Artboard ${tree.length + 1}`,
       frame: "desktop",
       width: w,
       height: h,
       unit: customUnit,
-      sections: [{ id: crypto.randomUUID(), name: isSocial ? "Main Panel" : "First Section" }],
+      formatLabel: isLogo ? `Custom — ${w}×${h} ${customUnit}` : undefined,
+      sections: [
+        {
+          id: crypto.randomUUID(),
+          name: isSocial ? "Main Panel" : isLogo ? "Logo" : "First Section",
+        },
+      ],
       expansionDirection: "vertical",
     };
 
@@ -896,7 +1400,12 @@ export default function ProjectEditorPage() {
     }
 
     setActiveId(newId);
+    setPresetPickerOpen(false);
     setSizeModalOpen(false);
+    if (isLogo || isSocial) {
+      setRenamingId(newId);
+      setRenameDraft("Untitled");
+    }
     toast.success(`Custom artboard (${w}x${h} ${customUnit}) created.`);
   }
 
@@ -915,9 +1424,125 @@ export default function ProjectEditorPage() {
     };
     setTree((prev) => [...prev, child]);
     setActiveId(newId);
+    setPresetPickerOpen(false);
     setRenamingId(newId);
     setRenameDraft("Untitled");
     toast.success(`Preset "${name}" loaded.`);
+  }
+
+  function handleCreateLogoPreset(name: string, platform: string, width: number, height: number) {
+    const newId = crypto.randomUUID();
+    const child: EditorTreeNode = {
+      id: newId,
+      kind: "screen",
+      name: "Untitled",
+      frame: "desktop",
+      formatLabel: `${platform} — ${name}`,
+      width,
+      height,
+      unit: "px",
+      sections: [{ id: crypto.randomUUID(), name: "Logo" }],
+      expansionDirection: "vertical",
+    };
+    setTree((prev) => [...prev, child]);
+    setActiveId(newId);
+    setPresetPickerOpen(false);
+    setRenamingId(newId);
+    setRenameDraft("Untitled");
+    toast.success(`Preset "${name}" ready.`);
+  }
+
+  function openLogoCustomSizeModal() {
+    setCustomWidth("800");
+    setCustomHeight("800");
+    setCustomUnit("px");
+    setPendingFolderId(null);
+    setSizeModalOpen(true);
+  }
+
+  async function collectDownloadImages(): Promise<GeneratedUiImage[]> {
+    const imagesToDownload: GeneratedUiImage[] = [];
+    const seen = new Set<string>();
+    const push = (img: GeneratedUiImage | null) => {
+      if (!img?.url) return;
+      const key = img.id || img.url;
+      if (seen.has(key)) return;
+      seen.add(key);
+      imagesToDownload.push(img);
+    };
+    if (activeNode?.kind === "screen") {
+      const sections = activeNode.sections ?? [{ id: "base", name: "Base" }];
+      sections.forEach((sec, idx) => {
+        push(pickImageForSection(activeNode, sec, idx, generatedUiImages, tree));
+      });
+    }
+    if (!imagesToDownload.length) {
+      const candidates = generatedUiImages
+        .filter((img) => !String(img.page_name || "").toLowerCase().includes("style guide"))
+        .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+      for (const img of candidates) push(img);
+    }
+    return imagesToDownload;
+  }
+
+  async function handleDownloadProject() {
+    const imagesToDownload = await collectDownloadImages();
+    if (!imagesToDownload.length) {
+      toast.error("No design image to download yet.");
+      return;
+    }
+    const projectLabel = sanitizePngFilename(projectMeta?.name || "design", "design").replace(
+      /\.png$/i,
+      "",
+    );
+    try {
+      for (let i = 0; i < imagesToDownload.length; i++) {
+        const img = imagesToDownload[i];
+        const name =
+          imagesToDownload.length > 1
+            ? `${projectLabel}-${i + 1}.png`
+            : sanitizePngFilename(img.filename || projectLabel, projectLabel);
+        await downloadImageAsPng(img.url, name);
+        if (imagesToDownload.length > 1 && i < imagesToDownload.length - 1) {
+          await new Promise((r) => setTimeout(r, 350));
+        }
+      }
+      toast.success(
+        imagesToDownload.length > 1
+          ? `Downloaded ${imagesToDownload.length} PNG files.`
+          : "Downloaded PNG.",
+      );
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Download failed.");
+    }
+  }
+
+  async function handleDownloadLogo(format: "png" | "ico" | "fav") {
+    const imagesToDownload = await collectDownloadImages();
+    if (!imagesToDownload.length) {
+      toast.error("No logo to download yet.");
+      return;
+    }
+    const img = imagesToDownload[0];
+    const base = sanitizeDownloadBasename(
+      activeNode?.kind === "screen" ? activeNode.name : projectMeta?.name || "logo",
+      "logo",
+    );
+    try {
+      if (format === "png") {
+        await downloadImageAsPng(img.url, `${base}.png`);
+        toast.success("Downloaded PNG.");
+        return;
+      }
+      const favSize =
+        activeNode?.kind === "screen" && activeNode.width && activeNode.width <= 64
+          ? Math.min(activeNode.width, 48)
+          : 32;
+      await downloadImageAsFavicon(img.url, base, format, favSize);
+      toast.success(format === "ico" ? "Downloaded ICO favicon." : "Downloaded .fav favicon.");
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : "Download failed.");
+    }
   }
 
   function handleDeleteNode(id: string) {
@@ -1258,7 +1883,7 @@ export default function ProjectEditorPage() {
   const [canvasTheme, setCanvasTheme] = useState<"light" | "dark">("light");
 
   function renderEmptyWorkspace() {
-    if (projectKind === "social media design") {
+    if (presetPickerOpen && projectKind === "social media design") {
       return (
         <div className="flex flex-col items-center justify-center min-h-full p-8 md:p-12 space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-5xl mx-auto">
           <div className="text-center space-y-2">
@@ -1301,6 +1926,58 @@ export default function ProjectEditorPage() {
                 </div>
               </button>
             ))}
+          </div>
+        </div>
+      );
+    }
+
+    if (presetPickerOpen && projectKind === "logo design") {
+      return (
+        <div className="flex flex-col items-center justify-center min-h-full p-8 md:p-12 space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-5xl mx-auto">
+          <div className="text-center space-y-2">
+            <h3 className="font-display text-3xl font-bold tracking-tight">Logo & Brand Presets</h3>
+            <p className="text-[0.8rem] text-muted-foreground max-w-xl mx-auto">
+              Pick a canvas for Instagram, Facebook, favicon sizes (32–500px), app icons, and more — or set a custom size.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 w-full">
+            {LOGO_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => handleCreateLogoPreset(preset.name, preset.platform, preset.w, preset.h)}
+                className="group relative flex flex-col items-start justify-between p-5 rounded-2xl border border-foreground/10 bg-foreground/[0.02] text-left hover:bg-[#eca8d6]/5 hover:border-[#eca8d6]/30 hover:scale-[1.02] active:scale-[0.98] transition-all duration-300 shadow-sm overflow-hidden"
+              >
+                <div className="absolute inset-0 bg-gradient-to-br from-[#eca8d6]/0 to-[#eca8d6]/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
+                <div className="space-y-4 z-10 w-full">
+                  <span className="inline-flex items-center rounded-full bg-foreground/5 group-hover:bg-[#eca8d6]/10 px-2 py-0.5 text-[0.65rem] font-medium text-muted-foreground group-hover:text-[#eca8d6] transition-colors">
+                    {preset.platform}
+                  </span>
+                  <div className="space-y-1">
+                    <h4 className="font-semibold text-[0.85rem] leading-tight group-hover:text-[#eca8d6] transition-colors line-clamp-2">
+                      {preset.name}
+                    </h4>
+                    <p className="text-[0.7rem] text-muted-foreground font-mono">{preset.size}</p>
+                  </div>
+                </div>
+                <div className="mt-6 flex items-center justify-between w-full z-10 text-[0.7rem] font-semibold text-muted-foreground group-hover:text-foreground transition-colors">
+                  <span>Create artboard</span>
+                  <Plus className="size-3.5 group-hover:rotate-90 transition-transform duration-300" />
+                </div>
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={openLogoCustomSizeModal}
+              className="flex flex-col items-start justify-between p-5 rounded-2xl border-2 border-dashed border-foreground/15 hover:border-[#eca8d6]/30 hover:bg-[#eca8d6]/5 transition-all text-muted-foreground hover:text-[#eca8d6] min-h-[140px]"
+            >
+              <span className="text-[0.65rem] font-bold uppercase tracking-widest">Custom</span>
+              <div className="mt-auto space-y-1">
+                <p className="font-semibold text-[0.85rem]">Custom size</p>
+                <p className="text-[0.7rem] font-mono opacity-70">Any width × height</p>
+              </div>
+            </button>
           </div>
         </div>
       );
@@ -1360,7 +2037,10 @@ export default function ProjectEditorPage() {
           width = 1080;
         }
       }
-      if (isWeb) {
+      if (projectKind === "landing page") {
+        aspectRatio = RESOLUTIONS.LANDING_PAGE.w / RESOLUTIONS.LANDING_PAGE.h;
+        width = RESOLUTIONS.LANDING_PAGE.w;
+      } else if (isWeb) {
         aspectRatio = screen.frame === "mobile" ? RESOLUTIONS.WEBSITE.MOBILE.w / RESOLUTIONS.WEBSITE.MOBILE.h : RESOLUTIONS.WEBSITE.DESKTOP.w / RESOLUTIONS.WEBSITE.DESKTOP.h;
       }
 
@@ -1369,6 +2049,14 @@ export default function ProjectEditorPage() {
           "relative min-h-full flex flex-col",
           isMobileHorizontal ? "items-start" : "items-center"
         )}>
+          {showPrototypeFlow && displayFlowGraph ? (
+            <div className="w-full max-w-6xl shrink-0 mb-10 px-2">
+              <UiPrototypeFlowPanel
+                flowGraph={displayFlowGraph}
+                images={flowGalleryImages}
+              />
+            </div>
+          ) : null}
           {screen.formatLabel && (
             <div className="w-full flex justify-start mb-6 px-1 shrink-0">
               <span className="text-[0.6rem] bg-[#eca8d6]/10 text-[#eca8d6] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">{screen.formatLabel}</span>
@@ -1453,29 +2141,47 @@ export default function ProjectEditorPage() {
 
       {/* Header */}
       <div className="shrink-0 z-50 border-b border-foreground/5 bg-background/60 backdrop-blur-2xl h-12 flex items-center justify-between px-4">
-        <div className="flex items-center gap-4">
-          <Button variant="ghost" size="icon" className="size-8" onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}>
-            <LayoutGrid className="size-4 text-[#eca8d6]" />
+        <div className="flex items-center gap-2 min-w-0">
+          {isOwner ? (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 shrink-0 text-muted-foreground hover:text-[#eca8d6]"
+              onClick={() => handleSafeNavigate("/projects")}
+              title="Back to projects"
+              aria-label="Back to projects"
+            >
+              <ArrowLeft className="size-4" />
+            </Button>
+          ) : (
+            <span
+              className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg bg-[#eca8d6]/10 text-[#eca8d6]"
+              title="Shared editor access"
+            >
+              <Share className="size-3.5" />
+            </span>
+          )}
+          {isSharedEditor ? (
+            <span className="hidden sm:inline text-[0.58rem] font-bold uppercase tracking-[0.18em] text-[#eca8d6]/90">
+              Shared edit
+            </span>
+          ) : null}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-8 shrink-0"
+            onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+              title={isSidebarCollapsed ? "Show screens" : "Hide screens"}
+              aria-label={isSidebarCollapsed ? "Show screens" : "Hide screens"}
+            >
+              <LayoutGrid className="size-4 text-[#eca8d6]" />
           </Button>
-          <button
-            onClick={() => handleSafeNavigate("/")}
-            className="font-mono text-[0.65rem] font-black text-muted-foreground uppercase tracking-[0.4em] outline-none hover:text-white transition-colors"
-          >
-            Designer
-          </button>
-          <div className="h-4 w-px bg-foreground/10 mx-2" />
-          <Menubar className="h-8 border-transparent bg-transparent shadow-none p-0 cursor-default">
+          <div className="h-4 w-px bg-foreground/10 mx-1 hidden sm:block" />
+          <Menubar className="h-8 border-transparent bg-transparent shadow-none p-0 cursor-default hidden sm:flex">
             <MenubarMenu><MenubarTrigger className="text-[0.7rem] uppercase font-bold tracking-tighter">File</MenubarTrigger></MenubarMenu>
           </Menubar>
         </div>
-        <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-4 py-1.5 rounded-2xl bg-foreground/[0.03] border border-foreground/5">
-          <button
-            onClick={() => handleSafeNavigate("/projects")}
-            className="text-[0.65rem] font-bold text-muted-foreground hover:text-[#eca8d6] uppercase outline-none"
-          >
-            Projects
-          </button>
-          <span className="text-muted-foreground/30 text-[0.6rem]">/</span>
+        <div className="absolute left-1/2 -translate-x-1/2 flex items-center max-w-[min(50vw,280px)] px-4 py-1.5 rounded-2xl bg-foreground/[0.03] border border-foreground/5">
           <span className="text-[0.7rem] font-black uppercase truncate">{projectMeta?.name ?? "Untitled"}</span>
         </div>
         <div className="flex items-center gap-2">
@@ -1495,29 +2201,68 @@ export default function ProjectEditorPage() {
                 {isSaving ? "Saving..." : "Save"}
               </Button>
             )}
-            <Button
-              variant="outline"
-              size="sm"
-              className={cn(
-                "h-8 rounded-full px-4 text-[0.65rem] font-black uppercase tracking-[0.22em]",
-                "border-foreground/15 bg-background text-foreground hover:bg-foreground/5"
-              )}
-              onClick={handleDownloadProject}
-            >
-              Download <Download className="ml-2 size-3.5" />
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className={cn(
-                "h-8 rounded-full px-4 text-[0.65rem] font-black uppercase tracking-[0.22em]",
-                "border-[#eca8d6]/30 bg-[#eca8d6] text-background hover:bg-[#eca8d6]/90",
-                "shadow-sm shadow-[#eca8d6]/20"
-              )}
-              onClick={() => setShareOpen(true)}
-            >
-              Share <Share className="ml-2 size-3.5" />
-            </Button>
+            {projectKind === "logo design" ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className={cn(
+                      "h-8 rounded-full px-4 text-[0.65rem] font-black uppercase tracking-[0.22em]",
+                      "border-foreground/15 bg-background text-foreground hover:bg-foreground/5"
+                    )}
+                  >
+                    Download <ChevronDown className="ml-2 size-3.5" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-48">
+                  <DropdownMenuItem
+                    className="text-[0.75rem] font-medium cursor-pointer"
+                    onClick={() => void handleDownloadLogo("png")}
+                  >
+                    PNG (full artboard)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    className="text-[0.75rem] font-medium cursor-pointer"
+                    onClick={() => void handleDownloadLogo("ico")}
+                  >
+                    Favicon (.ico)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    className="text-[0.75rem] font-medium cursor-pointer"
+                    onClick={() => void handleDownloadLogo("fav")}
+                  >
+                    Favicon (.fav)
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                className={cn(
+                  "h-8 rounded-full px-4 text-[0.65rem] font-black uppercase tracking-[0.22em]",
+                  "border-foreground/15 bg-background text-foreground hover:bg-foreground/5"
+                )}
+                onClick={() => void handleDownloadProject()}
+              >
+                Download <Download className="ml-2 size-3.5" />
+              </Button>
+            )}
+            {isOwner ? (
+              <Button
+                variant="outline"
+                size="sm"
+                className={cn(
+                  "h-8 rounded-full px-4 text-[0.65rem] font-black uppercase tracking-[0.22em]",
+                  "border-[#eca8d6]/30 bg-[#eca8d6] text-background hover:bg-[#eca8d6]/90",
+                  "shadow-sm shadow-[#eca8d6]/20"
+                )}
+                onClick={() => setShareOpen(true)}
+              >
+                Share <Share className="ml-2 size-3.5" />
+              </Button>
+            ) : null}
           </div>
           <Avatar className="size-9 shrink-0 border border-foreground/10 bg-foreground/[0.03] shadow-sm shadow-black/10">
             <AvatarFallback className="bg-[#eca8d6] text-background text-xs font-mono font-bold">
@@ -1531,7 +2276,12 @@ export default function ProjectEditorPage() {
         <ResizablePanelGroup direction="horizontal">
           {!isSidebarCollapsed && (
             <>
-              <ResizablePanel defaultSize={16} minSize={12} maxSize={30} className="border-r border-foreground/5">
+              <ResizablePanel
+                defaultSize={showDesignerChat ? 16 : 18}
+                minSize={12}
+                maxSize={30}
+                className="border-r border-foreground/5"
+              >
                 <aside className="h-full flex flex-col no-scrollbar overflow-y-auto">
                   <div className="flex justify-between px-5 pt-6 pb-4 shrink-0">
                     <div className="text-[0.6rem] font-black uppercase tracking-[0.2em] text-muted-foreground/40">{filesLabel}</div>
@@ -1544,17 +2294,22 @@ export default function ProjectEditorPage() {
             </>
           )}
 
-          <ResizablePanel defaultSize={56}>
+          <ResizablePanel defaultSize={showDesignerChat ? 56 : 100} minSize={40}>
             <section className="h-full flex flex-col bg-foreground/[0.01] overflow-hidden">
               <div
                 ref={workspaceRef}
                 onWheel={handleWorkspaceWheel}
                 className={cn(
-                  "flex-1 relative p-24 bg-[radial-gradient(circle_at_center,_transparent_0%,_rgba(0,0,0,0.02)_100%)] thin-scrollbar",
-                  (activeNode?.kind === "screen" && activeNode.frame === "mobile") || projectKind === "practice"
-                    ? "overflow-x-auto overflow-y-auto"
-                    : "overflow-x-hidden overflow-y-auto",
-                  projectKind === "practice" && "p-0"
+                  "flex-1 relative thin-scrollbar",
+                  !showDesignerChat
+                    ? "overflow-hidden"
+                    : cn(
+                        "p-24 bg-[radial-gradient(circle_at_center,_transparent_0%,_rgba(0,0,0,0.02)_100%)]",
+                        (activeNode?.kind === "screen" && activeNode.frame === "mobile") || projectKind === "practice"
+                          ? "overflow-x-auto overflow-y-auto"
+                          : "overflow-x-hidden overflow-y-auto",
+                        projectKind === "practice" && "p-0",
+                      )
                 )}
               >
                 {renderWorkspaceBody()}
@@ -1562,40 +2317,46 @@ export default function ProjectEditorPage() {
             </section>
           </ResizablePanel>
 
-          <ResizableHandle className="bg-foreground/5 w-[1px] hover:bg-[#eca8d6]/30 transition-all" />
-
-          <ResizablePanel defaultSize={28} minSize={20} className="border-l border-foreground/5">
-            <aside className="flex flex-col h-full bg-background no-scrollbar overflow-hidden">
-              <div className="flex items-center justify-between px-6 py-4 border-b border-white/5 shrink-0">
-                <div className="text-sm font-medium">Designer</div>
-                <div className="flex items-center gap-3 text-muted-foreground/60">
-                  {projectKind !== "multi-page website" && (
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/5 bg-white/[0.02] hover:bg-white/[0.08] transition-all text-[0.65rem] font-bold uppercase tracking-widest text-zinc-500 outline-none group/btn">
-                          Designer <ChevronDown className="size-3 ml-0.5 opacity-40 group-hover/btn:opacity-100 transition-opacity" />
-                        </button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="w-40 bg-black border border-white/10 text-white p-1 rounded-lg">
-                        <DropdownMenuItem className="rounded-md px-3 py-2 hover:bg-white/10 cursor-pointer outline-none transition-colors text-[0.7rem] font-medium">Designer</DropdownMenuItem>
-                        <DropdownMenuItem className="rounded-md px-3 py-2 hover:bg-white/10 cursor-pointer outline-none transition-colors text-[0.7rem] font-medium">Gemini</DropdownMenuItem>
-                        <DropdownMenuItem className="rounded-md px-3 py-2 hover:bg-white/10 cursor-pointer outline-none transition-colors text-[0.7rem] font-medium">GPT-4</DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  )}
-                  <Clock className="size-4 cursor-pointer hover:text-white transition-colors ml-1" />
-                </div>
-              </div>
-              <UIDesignerEditorChatPanel
-                projectId={projectId}
-                projectKind={projectKind}
-                onImagesChange={mergeGeneratedUiImages}
-                activeScreenId={activeId}
-                onCreateDefaultScreen={() => handleHeaderPlus(true)}
-                activeScreen={activeNode?.kind === "screen" ? activeNode : undefined}
-              />
-            </aside>
-          </ResizablePanel>
+          {showDesignerChat ? (
+            <>
+              <ResizableHandle className="bg-foreground/5 w-[1px] hover:bg-[#eca8d6]/30 transition-all" />
+              <ResizablePanel defaultSize={28} minSize={20} className="border-l border-foreground/5">
+                <aside className="flex flex-col h-full bg-background no-scrollbar overflow-hidden">
+                  <div className="flex items-center justify-between px-6 py-4 border-b border-white/5 shrink-0">
+                    <div className="text-sm font-medium">Designer</div>
+                    <div className="flex items-center gap-3 text-muted-foreground/60">
+                      {projectKind !== "multi-page website" && (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/5 bg-white/[0.02] hover:bg-white/[0.08] transition-all text-[0.65rem] font-bold uppercase tracking-widest text-zinc-500 outline-none group/btn">
+                              Designer <ChevronDown className="size-3 ml-0.5 opacity-40 group-hover/btn:opacity-100 transition-opacity" />
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-40 bg-black border border-white/10 text-white p-1 rounded-lg">
+                            <DropdownMenuItem className="rounded-md px-3 py-2 hover:bg-white/10 cursor-pointer outline-none transition-colors text-[0.7rem] font-medium">Designer</DropdownMenuItem>
+                            <DropdownMenuItem className="rounded-md px-3 py-2 hover:bg-white/10 cursor-pointer outline-none transition-colors text-[0.7rem] font-medium">Gemini</DropdownMenuItem>
+                            <DropdownMenuItem className="rounded-md px-3 py-2 hover:bg-white/10 cursor-pointer outline-none transition-colors text-[0.7rem] font-medium">GPT-4</DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      )}
+                      <Clock className="size-4 cursor-pointer hover:text-white transition-colors ml-1" />
+                    </div>
+                  </div>
+                  <UIDesignerEditorChatPanel
+                    projectId={projectId}
+                    projectKind={projectKind}
+                    projectGeneratedImages={generatedUiImages}
+                    onImagesChange={syncImagesFromChat}
+                    onFlowGraphChange={applyFlowGraph}
+                    onEnsurePrototypeSection={ensurePrototypeSection}
+                    activeScreenId={activeId}
+                    onCreateDefaultScreen={() => handleHeaderPlus(true)}
+                    activeScreen={activeNode?.kind === "screen" ? activeNode : undefined}
+                  />
+                </aside>
+              </ResizablePanel>
+            </>
+          ) : null}
         </ResizablePanelGroup>
       </div>
 

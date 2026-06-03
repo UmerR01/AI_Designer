@@ -36,7 +36,10 @@ export async function POST(req: Request) {
   if (!invite) return NextResponse.json({ detail: "Invite not found." }, { status: 404 });
 
   if (invite.accepted_at) {
-    return NextResponse.json({ ok: true, projectId: invite.project_id }, { status: 200 });
+    return NextResponse.json(
+      { ok: true, projectId: invite.project_id, role: invite.role },
+      { status: 200 },
+    );
   }
 
   // Mark accepted and add membership. (If already a member, do nothing.)
@@ -51,6 +54,9 @@ export async function POST(req: Request) {
     on conflict (project_id, user_id) do update set role = excluded.role
   `;
 
-  return NextResponse.json({ ok: true, projectId: invite.project_id }, { status: 200 });
+  return NextResponse.json(
+    { ok: true, projectId: invite.project_id, role: invite.role },
+    { status: 200 },
+  );
 }
 

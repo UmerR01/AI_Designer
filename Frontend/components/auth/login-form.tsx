@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useState, useRef } from "react";
+import { safeReturnPath } from "@/lib/auth/login-redirect";
 import { Eye, EyeOff } from "lucide-react";
 import { toast } from "sonner";
 import { TurnstileWidget } from "@/components/ui/turnstile-widget";
@@ -13,6 +15,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { AuthShell } from "@/components/auth/auth-shell";
 
 export function LoginFormView() {
+  const searchParams = useSearchParams();
+  const nextPath = safeReturnPath(searchParams.get("next"));
   const [remember, setRemember] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [email, setEmail] = useState("");
@@ -78,6 +82,8 @@ export function LoginFormView() {
             toast.success("Welcome back.");
             if (res?.user?.is_support_agent) {
               window.location.href = "/support";
+            } else if (nextPath) {
+              window.location.href = nextPath;
             } else {
               window.location.href = "/dashboard";
             }

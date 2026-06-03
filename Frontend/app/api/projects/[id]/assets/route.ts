@@ -2,6 +2,11 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/lib/auth/server";
 import { sql } from "@/lib/db";
+import {
+  mergeProjectGeneratedImages,
+  normalizeCreatedAt,
+  type GeneratedUiImageRecord,
+} from "@/lib/generated-ui-images";
 import { canRead, canWrite, getUserRoleForProject } from "@/lib/projects/authz";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +18,20 @@ const ImageSchema = z.object({
   url: z.string(),
   created_at: z.string().optional(),
   prompt: z.string().optional(),
+  nodeId: z.string().optional(),
+  screenName: z.string().optional(),
+  isAnchor: z.boolean().optional(),
+  index: z.number().optional(),
+  total: z.number().optional(),
 });
+
+const UiFlowGraphSchema = z
+  .object({
+    nodes: z.array(z.record(z.string(), z.unknown())),
+    relations: z.array(z.record(z.string(), z.unknown())),
+  })
+  .nullable()
+  .optional();
 
 const BodySchema = z.object({
   sessionId: z.string().optional(),
@@ -21,6 +39,7 @@ const BodySchema = z.object({
   model: z.string().optional(),
   prompt: z.string().optional(),
   images: z.array(ImageSchema).min(1),
+  uiFlowGraph: UiFlowGraphSchema,
 });
 
 export async function GET(_: Request, ctx: { params: Promise<{ id: string }> }) {
@@ -33,33 +52,50 @@ export async function GET(_: Request, ctx: { params: Promise<{ id: string }> }) 
 
   const rows = await sql()<{
     id: string;
+    source_image_id: string | null;
     page_name: string | null;
     filename: string;
     url: string;
     created_at: string;
   }>`
-    select id, page_name, filename, url, created_at
+    select id, source_image_id, page_name, filename, url, created_at
     from project_assets
     where project_id = ${projectId}
     order by created_at desc
     limit 200
   `;
 
-  return NextResponse.json(
-    {
-      images: rows.map((r: any) => ({
-        id: r.id,
-        page_name: r.page_name ?? undefined,
-        filename: r.filename,
-        url: r.url,
-        created_at: r.created_at,
-      })),
-    },
-    { status: 200 },
-  );
+  const existingProject = await sql()<{ data: unknown }>`
+    select data from projects where id = ${projectId} limit 1
+  `;
+  const existingData =
+    existingProject[0]?.data && typeof existingProject[0].data === "object"
+      ? (existingProject[0].data as Record<string, unknown>)
+      : {};
+  const existingGenerated = Array.isArray(existingData.generatedUiImages)
+    ? (existingData.generatedUiImages as Parameters<
+        typeof mergeProjectGeneratedImages
+      >[0]["existing"])
+    : [];
+
+  const images = mergeProjectGeneratedImages({
+    existing: existingGenerated,
+    incoming: [],
+    canonical: rows.map((r) => ({
+      id: r.id,
+      source_image_id: r.source_image_id,
+      page_name: r.page_name,
+      filename: r.filename,
+      url: r.url,
+      created_at: r.created_at,
+    })),
+  });
+
+  return NextResponse.json({ images }, { status: 200 });
 }
 
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
+  try {
   const user = await requireUser().catch(() => null);
   if (!user) return NextResponse.json({ detail: "Unauthorized." }, { status: 401 });
 
@@ -107,12 +143,13 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 
   const canonical = await sql()<{
     id: string;
+    source_image_id: string | null;
     page_name: string | null;
     filename: string;
     url: string;
     created_at: string;
   }>`
-    select id, page_name, filename, url, created_at
+    select id, source_image_id, page_name, filename, url, created_at
     from project_assets
     where project_id = ${projectId}
     order by created_at desc
@@ -126,15 +163,34 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     existingProject[0]?.data && typeof existingProject[0].data === "object"
       ? (existingProject[0].data as Record<string, unknown>)
       : {};
-  const nextData = {
-    ...existingData,
-    generatedUiImages: canonical.map((r: any) => ({
+  const existingGenerated: GeneratedUiImageRecord[] = Array.isArray(
+    existingData.generatedUiImages,
+  )
+    ? (existingData.generatedUiImages as GeneratedUiImageRecord[]).filter(
+        (x) => x?.id && x?.url && x?.filename,
+      )
+    : [];
+
+  const mergedGenerated = mergeProjectGeneratedImages({
+    existing: existingGenerated,
+    incoming: body.images,
+    canonical: canonical.map((r) => ({
       id: r.id,
-      page_name: r.page_name ?? undefined,
+      source_image_id: r.source_image_id,
+      page_name: r.page_name,
       filename: r.filename,
       url: r.url,
       created_at: r.created_at,
     })),
+  });
+
+  const nextData = {
+    ...existingData,
+    generatedUiImages: mergedGenerated,
+    uiFlowGraph:
+      body.uiFlowGraph ??
+      (existingData.uiFlowGraph as unknown) ??
+      null,
     updatedBy: { id: user.id, email: user.email },
     savedAt: new Date().toISOString(),
   };
@@ -149,5 +205,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     { ok: true, batchId, count: body.images.length, images: nextData.generatedUiImages },
     { status: 201 },
   );
+  } catch (err) {
+    console.error("[assets] POST failed:", err);
+    const message = err instanceof Error ? err.message : "Asset save failed.";
+    return NextResponse.json({ detail: message }, { status: 500 });
+  }
 }
 

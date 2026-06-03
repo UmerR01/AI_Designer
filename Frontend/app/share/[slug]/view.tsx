@@ -1,88 +1,108 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Download } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { getJson, postJson } from "@/lib/auth-api";
+import { ApiError, getJson, postJson } from "@/lib/auth-api";
+import { loginUrlWithNext } from "@/lib/auth/login-redirect";
+import { SharedProjectViewer } from "@/components/share/shared-project-viewer";
+import type { ShareGalleryImage } from "@/lib/share-gallery";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
 type ShareResponse = {
   locked?: boolean;
+  requiresLogin?: boolean;
   link?: { slug: string; role: "viewer" | "editor"; visibility: "public" | "password" };
-  project?: { id: string; name: string; kind: string; data: any };
-  assets?: SharedImage[];
+  project?: { id: string; name: string; kind: string; data?: unknown };
+  assets?: ShareGalleryImage[];
   detail?: string;
 };
 
-type SharedImage = {
-  id: string;
-  url: string;
-  filename: string;
-  page_name?: string;
-  created_at?: string;
-};
-
 export default function ShareViewClient({ slug }: { slug: string }) {
+  const router = useRouter();
+  const sharePath = `/share/${slug}`;
   const [loading, setLoading] = useState(true);
   const [locked, setLocked] = useState(false);
   const [shareLink, setShareLink] = useState<ShareResponse["link"]>(undefined);
   const [project, setProject] = useState<ShareResponse["project"]>(undefined);
-  const [assets, setAssets] = useState<SharedImage[]>([]);
+  const [assets, setAssets] = useState<ShareGalleryImage[]>([]);
   const [password, setPassword] = useState("");
-  const generatedFromData = useMemo(() => {
-    const data = project?.data;
-    if (!data || typeof data !== "object") return [] as SharedImage[];
-    const raw = (data as any).generatedUiImages;
-    if (!Array.isArray(raw)) return [] as SharedImage[];
-    return raw.filter((x) => x && typeof x === "object" && x.url && x.filename) as SharedImage[];
-  }, [project]);
-  const generatedImages = useMemo(() => {
-    const byKey = new Map<string, SharedImage>();
-    for (const img of [...generatedFromData, ...assets]) {
-      const key = img.id || img.url || img.filename;
-      if (!key) continue;
-      const prev = byKey.get(key);
-      if (!prev || (img.created_at || "").localeCompare(prev.created_at || "") >= 0) {
-        byKey.set(key, img);
+  const [openingEditor, setOpeningEditor] = useState(false);
+
+  function redirectToLogin() {
+    router.replace(loginUrlWithNext(sharePath));
+  }
+
+  async function openSharedEditor(projectId: string) {
+    setOpeningEditor(true);
+    try {
+      const me = await getJson<{ user?: { id: string } }>("/api/auth/me").catch(() => null);
+      if (!me?.user?.id) {
+        redirectToLogin();
+        return;
       }
+      await postJson(`/api/share/${slug}/claim`, {});
+      router.replace(`/project/${projectId}?shared=1`);
+    } catch (e: unknown) {
+      if (e instanceof ApiError && e.status === 401) {
+        redirectToLogin();
+        return;
+      }
+      const err = e as { detail?: string; message?: string };
+      toast.error(err?.detail ?? err?.message ?? "Could not open editor.");
+    } finally {
+      setOpeningEditor(false);
     }
-    return Array.from(byKey.values()).sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
-  }, [generatedFromData, assets]);
+  }
 
   async function load() {
     setLoading(true);
     try {
       const res = await getJson<ShareResponse>(`/api/share/${slug}`);
+
+      if (res.requiresLogin) {
+        redirectToLogin();
+        return null;
+      }
+
       setLocked(Boolean(res.locked));
       setShareLink(res.link);
       setProject(res.project);
       setAssets(Array.isArray(res.assets) ? res.assets : []);
-    } catch (e: any) {
-      toast.error(e?.detail ?? e?.message ?? "Could not load share.");
+
+      if (!res.locked && res.link?.role === "editor" && res.project?.id) {
+        await openSharedEditor(res.project.id);
+      }
+
+      return res;
+    } catch (e: unknown) {
+      if (e instanceof ApiError && e.status === 401) {
+        redirectToLogin();
+        return null;
+      }
+      const err = e as { detail?: string; message?: string };
+      toast.error(err?.detail ?? err?.message ?? "Could not load share.");
+      return null;
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    load();
+    void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug]);
 
-  useEffect(() => {
-    if (loading || locked) return;
-    if (!project?.id) return;
-    if (shareLink?.role !== "editor") return;
-    // Editor links should open the actual workspace directly.
-    window.location.replace(`/project/${project.id}`);
-  }, [loading, locked, shareLink?.role, project?.id]);
-
-  if (loading) {
+  if (loading || openingEditor || shareLink?.role === "editor") {
     return (
       <div className="min-h-[70vh] flex items-center justify-center p-8 text-center">
-        <div className="text-sm text-muted-foreground">Loading…</div>
+        <div className="text-sm text-muted-foreground">
+          {openingEditor || shareLink?.role === "editor"
+            ? "Sign in required — redirecting…"
+            : "Loading…"}
+        </div>
       </div>
     );
   }
@@ -93,7 +113,12 @@ export default function ShareViewClient({ slug }: { slug: string }) {
         <div className="w-full max-w-md rounded-3xl border border-foreground/10 bg-background/70 backdrop-blur-xl p-6 space-y-4">
           <div className="space-y-1">
             <div className="font-display text-2xl tracking-tight">Private link</div>
-            <div className="text-sm text-muted-foreground">Enter the password to view this project.</div>
+            <div className="text-sm text-muted-foreground">
+              Enter the password to continue.
+              {shareLink?.role === "editor" ? (
+                <span className="block mt-1">You will need to sign in to edit this project.</span>
+              ) : null}
+            </div>
           </div>
           <Input
             type="password"
@@ -110,8 +135,9 @@ export default function ShareViewClient({ slug }: { slug: string }) {
                 toast.success("Unlocked.");
                 setPassword("");
                 await load();
-              } catch (e: any) {
-                toast.error(e?.detail ?? e?.message ?? "Wrong password.");
+              } catch (e: unknown) {
+                const err = e as { detail?: string; message?: string };
+                toast.error(err?.detail ?? err?.message ?? "Wrong password.");
               }
             }}
           >
@@ -139,78 +165,12 @@ export default function ShareViewClient({ slug }: { slug: string }) {
   }
 
   return (
-    <div className="min-h-[70vh] p-8">
-      <div className="mx-auto max-w-3xl space-y-6">
-        <div className="flex items-end justify-between gap-4">
-          <div className="min-w-0">
-            <div className="text-xs font-mono uppercase tracking-[0.2em] text-muted-foreground">Shared project</div>
-            <div className="font-display text-3xl tracking-tight truncate">{project.name}</div>
-            <div className="text-sm text-muted-foreground mt-1 capitalize">{project.kind}</div>
-          </div>
-          <div className="flex items-center gap-2">
-            {generatedImages.length > 0 ? (
-              <Button
-                variant="outline"
-                className="rounded-full border-foreground/20"
-                onClick={() => {
-                  generatedImages.forEach((img, idx) => {
-                    window.setTimeout(() => {
-                      const a = document.createElement("a");
-                      a.href = img.url;
-                      a.download = img.filename || `design-${idx + 1}.png`;
-                      a.target = "_blank";
-                      a.rel = "noreferrer";
-                      document.body.appendChild(a);
-                      a.click();
-                      a.remove();
-                    }, idx * 120);
-                  });
-                }}
-              >
-                Download <Download className="ml-2 size-4" />
-              </Button>
-            ) : null}
-            <Button
-              variant="outline"
-              className="rounded-full border-foreground/20"
-              onClick={() => {
-                if (shareLink?.role === "editor" && project?.id) {
-                  window.location.replace(`/project/${project.id}`);
-                  return;
-                }
-                window.location.href = "/";
-              }}
-            >
-              {shareLink?.role === "editor" ? "Open editor" : "Open app"}
-            </Button>
-          </div>
-        </div>
-
-        <div className="rounded-3xl border border-foreground/10 bg-foreground/[0.02] p-6">
-          {generatedImages.length === 0 ? (
-            <div className="text-sm text-muted-foreground">
-              No generated design assets are available for this project yet.
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
-              {generatedImages
-                .slice()
-                .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))
-                .map((img) => (
-                  <div key={img.id} className="rounded-2xl border border-foreground/10 bg-background overflow-hidden self-start">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={img.url} alt={img.filename} className="w-full h-auto object-contain bg-white" />
-                    <div className="px-3 py-2 text-[0.72rem] text-muted-foreground font-mono">
-                      {img.page_name ? `${img.page_name} · ` : ""}
-                      {img.created_at ? new Date(img.created_at).toLocaleTimeString() : img.filename}
-                    </div>
-                  </div>
-                ))}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
+    <SharedProjectViewer
+      projectName={project.name}
+      projectKind={project.kind}
+      projectData={project.data}
+      assets={assets}
+      downloadProxyBase={`/api/share/${slug}/download`}
+    />
   );
 }
-

@@ -287,10 +287,10 @@ export function FloatingChatSupport() {
       ) : null}
 
       <div
-        className="pointer-events-none fixed bottom-0 left-0 z-50 pb-3 pl-3 sm:pb-4 sm:pl-4"
+        className="pointer-events-none fixed bottom-0 right-0 z-50 pb-3 pr-3 sm:pb-4 sm:pr-4"
         aria-live="polite"
       >
-        <div className="pointer-events-auto flex max-h-[100dvh] flex-col items-start justify-end gap-2">
+        <div className="pointer-events-auto flex max-h-[100dvh] flex-col items-end justify-end gap-2">
           {/* Panel only when open — avoids invisible panel pushing the FAB up */}
           {open ? (
             <div

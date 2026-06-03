@@ -1,9 +1,26 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState, useRef } from "react";
-import { Bell, Folder, Home, Settings, Search, LogOut, LayoutGrid, Cloud, Database, FolderPlus, Star, Library, Plus, ChevronDown, ChevronRight } from "lucide-react";
+import {
+  Bell,
+  Folder,
+  Home,
+  Search,
+  LogOut,
+  LayoutGrid,
+  Cloud,
+  Star,
+  Library,
+  Plus,
+  ChevronDown,
+  User,
+  Settings,
+  MoreHorizontal,
+  Pencil,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { getMeCached, postJson, getJson } from "@/lib/auth-api";
@@ -15,11 +32,39 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { FloatingChatSupport } from "@/components/support/floating-chat-support";
+
+const LIBRARIES_LIST_KEY = "designer.libraries_list";
+const LIBRARIES_DATA_KEY = "designer.libraries";
+
+function readLibrariesData(): Record<string, string[]> {
+  try {
+    const raw = localStorage.getItem(LIBRARIES_DATA_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, string[]>;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveLibrariesData(data: Record<string, string[]>) {
+  localStorage.setItem(LIBRARIES_DATA_KEY, JSON.stringify(data));
+  window.dispatchEvent(new Event("storage"));
+}
 
 /** Public asset: `public/images/marketing/hero.mp4` */
 const HERO_BG_VIDEO = "/images/marketing/hero.mp4";
@@ -65,11 +110,15 @@ function navItemActive(pathname: string | null, href: string): boolean {
   if (href === "/dashboard") return pathname === "/dashboard";
   if (href === "/projects") return pathname === "/projects" || pathname.startsWith("/projects/");
   if (href === "/settings") return pathname === "/settings" || pathname.startsWith("/settings/");
+  if (href === "/profile") return pathname === "/profile";
   return pathname === href;
 }
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const activeLibraryFilter = searchParams.get("library");
   const [me, setMe] = useState<MeResponse["user"] | null>(null);
   const [loading, setLoading] = useState(true);
   const [railCollapsed, setRailCollapsed] = useState(true); // default closed on mobile
@@ -82,7 +131,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [libraries, setLibraries] = useState<string[]>([]);
   const [showAddLib, setShowAddLib] = useState(false);
   const [newLibName, setNewLibName] = useState("");
-  const [libsOpen, setLibsOpen] = useState(true);
+  const [libsOpen, setLibsOpen] = useState(false);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [renameLibTarget, setRenameLibTarget] = useState<string | null>(null);
+  const [renameLibValue, setRenameLibValue] = useState("");
+  const [deleteLibTarget, setDeleteLibTarget] = useState<string | null>(null);
 
   const fetchProjCount = async () => {
     try {
@@ -105,17 +158,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const loadLibs = () => {
       try {
-        const list = localStorage.getItem("designer.libraries_list");
+        const list = localStorage.getItem(LIBRARIES_LIST_KEY);
         if (list) {
           const parsed = JSON.parse(list);
           // filter out Landing Pages and Mobile Apps as requested
           const filtered = parsed.filter((item: string) => item !== "Landing Pages" && item !== "Mobile Apps");
           setLibraries(filtered);
-          localStorage.setItem("designer.libraries_list", JSON.stringify(filtered));
+          localStorage.setItem(LIBRARIES_LIST_KEY, JSON.stringify(filtered));
         } else {
           // Empty list by default as requested
           setLibraries([]);
-          localStorage.setItem("designer.libraries_list", JSON.stringify([]));
+          localStorage.setItem(LIBRARIES_LIST_KEY, JSON.stringify([]));
         }
       } catch (e) {}
     };
@@ -135,12 +188,79 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }
     const updated = [...libraries, name];
     setLibraries(updated);
-    localStorage.setItem("designer.libraries_list", JSON.stringify(updated));
+    localStorage.setItem(LIBRARIES_LIST_KEY, JSON.stringify(updated));
     setNewLibName("");
     setShowAddLib(false);
     toast.success(`Library "${name}" created!`);
     window.dispatchEvent(new Event("storage"));
   };
+
+  useEffect(() => {
+    if (renameLibTarget) setRenameLibValue(renameLibTarget);
+  }, [renameLibTarget]);
+
+  function confirmRenameLibrary() {
+    if (!renameLibTarget) return;
+    const newName = renameLibValue.trim();
+    if (!newName) {
+      toast.error("Enter a library name.");
+      return;
+    }
+    if (newName === renameLibTarget) {
+      setRenameLibTarget(null);
+      return;
+    }
+    if (libraries.includes(newName)) {
+      toast.error("A library with that name already exists.");
+      return;
+    }
+
+    const updatedList = libraries.map((l) => (l === renameLibTarget ? newName : l));
+    setLibraries(updatedList);
+    localStorage.setItem(LIBRARIES_LIST_KEY, JSON.stringify(updatedList));
+
+    const data = readLibrariesData();
+    if (data[renameLibTarget]) {
+      data[newName] = data[renameLibTarget];
+      delete data[renameLibTarget];
+      saveLibrariesData(data);
+    }
+
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("library") === renameLibTarget) {
+        router.replace(`/projects?library=${encodeURIComponent(newName)}`);
+      }
+    }
+
+    setRenameLibTarget(null);
+    toast.success(`Library renamed to "${newName}".`);
+    window.dispatchEvent(new Event("storage"));
+  }
+
+  function confirmDeleteLibrary() {
+    if (!deleteLibTarget) return;
+    const name = deleteLibTarget;
+
+    const updatedList = libraries.filter((l) => l !== name);
+    setLibraries(updatedList);
+    localStorage.setItem(LIBRARIES_LIST_KEY, JSON.stringify(updatedList));
+
+    const data = readLibrariesData();
+    delete data[name];
+    saveLibrariesData(data);
+
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("library") === name) {
+        router.push("/projects");
+      }
+    }
+
+    setDeleteLibTarget(null);
+    toast.success(`Library "${name}" deleted.`);
+    window.dispatchEvent(new Event("storage"));
+  }
 
   useEffect(() => {
     try {
@@ -175,6 +295,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const sectionTitle = useMemo(() => {
     if (pathname?.startsWith("/project/")) return "Editor";
+    if (pathname?.startsWith("/profile")) return "Profile";
     if (pathname?.startsWith("/settings")) return "Settings";
     if (pathname?.startsWith("/projects")) return "Projects";
     if (pathname?.startsWith("/dashboard")) return "Home";
@@ -198,6 +319,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
+  async function handleSignOut() {
+    try {
+      await postJson("/api/auth/logout", {});
+    } finally {
+      toast.success("Signed out.");
+      window.location.href = "/";
+    }
+  }
+
   if (loading) {
     return (
       <div className="relative min-h-[100dvh] bg-background text-foreground flex flex-col items-center justify-center p-6">
@@ -217,7 +347,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const nav = [
     { href: "/dashboard", label: "Home", icon: Home },
     { href: "/projects", label: "Projects", icon: Folder },
-    { href: "/settings", label: "Settings", icon: Settings },
   ];
 
   const isSupportPage = pathname === "/support";
@@ -357,21 +486,71 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     {/* Dynamic User Libraries list */}
                     {libraries.map((lib) => {
                       const libHref = `/projects?library=${encodeURIComponent(lib)}`;
+                      const libActive = pathname === "/projects" && activeLibraryFilter === lib;
                       return (
-                        <Link
+                        <div
                           key={lib}
-                          href={libHref}
                           className={cn(
-                            "flex items-center gap-3 rounded-xl border px-3 py-1.5 text-xs transition-colors",
-                            "border-transparent hover:bg-foreground/[0.02]",
-                            pathname === "/projects" && pathname + decodeURIComponent(window?.location?.search || "") === `/projects?library=${lib}`
-                              ? "bg-foreground/5 border-foreground/5 text-foreground font-medium"
-                              : "text-muted-foreground hover:text-foreground"
+                            "group/lib flex items-center gap-0.5 rounded-xl border pr-1 transition-colors",
+                            libActive
+                              ? "border-foreground/5 bg-foreground/5"
+                              : "border-transparent hover:bg-foreground/[0.02]",
                           )}
                         >
-                          <Library className="size-3.5 text-[#eca8d6] shrink-0" />
-                          <span className="truncate">{lib}</span>
-                        </Link>
+                          <Link
+                            href={libHref}
+                            className={cn(
+                              "flex min-w-0 flex-1 items-center gap-3 rounded-lg px-3 py-1.5 text-xs transition-colors",
+                              libActive
+                                ? "text-foreground font-medium"
+                                : "text-muted-foreground hover:text-foreground",
+                            )}
+                            onClick={() => {
+                              if (window.innerWidth < 1024) setRailCollapsed(true);
+                            }}
+                          >
+                            <Library className="size-3.5 text-[#eca8d6] shrink-0" />
+                            <span className="truncate">{lib}</span>
+                          </Link>
+                          <DropdownMenu modal={false}>
+                            <DropdownMenuTrigger asChild>
+                              <button
+                                type="button"
+                                className={cn(
+                                  "flex size-7 shrink-0 items-center justify-center rounded-lg text-muted-foreground",
+                                  "opacity-100 hover:bg-foreground/10 hover:text-foreground",
+                                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#eca8d6]/40",
+                                  "data-[state=open]:opacity-100 data-[state=open]:bg-foreground/10",
+                                )}
+                                aria-label={`Library actions for ${lib}`}
+                                onClick={(e) => e.stopPropagation()}
+                                onPointerDown={(e) => e.stopPropagation()}
+                              >
+                                <MoreHorizontal className="size-3.5 text-[#eca8d6]" />
+                              </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent
+                              align="end"
+                              side="right"
+                              className="z-[200] w-40 rounded-xl border border-foreground/10 bg-background/95 backdrop-blur-xl p-1 shadow-lg"
+                            >
+                              <DropdownMenuItem
+                                className="gap-2 cursor-pointer text-[0.8rem]"
+                                onSelect={() => setRenameLibTarget(lib)}
+                              >
+                                <Pencil className="size-3.5 text-muted-foreground" />
+                                Rename
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                className="gap-2 cursor-pointer text-[0.8rem] text-destructive focus:text-destructive"
+                                onSelect={() => setDeleteLibTarget(lib)}
+                              >
+                                <Trash2 className="size-3.5" />
+                                Delete
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
                       );
                     })}
 
@@ -386,14 +565,26 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
               <div className="flex-1" />
 
-              <div className="px-3 lg:px-4 pb-4 mt-auto">
+              <div className="relative px-3 lg:px-4 pb-4 mt-auto space-y-3">
+                {profileMenuOpen ? (
+                  <div
+                    className="pointer-events-none absolute inset-0 -top-2 z-[8] rounded-b-2xl bg-background/50 backdrop-blur-md"
+                    aria-hidden
+                  />
+                ) : null}
                 {/* Expanded Storage View */}
                 {(() => {
                   const storageUsed = Number((projCount * 0.48 + 0.35).toFixed(1));
                   const percentage = Math.min((storageUsed / 5.0) * 100, 100);
                   const isFull = storageUsed >= 4.0;
                   return (
-                    <div className={cn("rounded-xl border border-foreground/10 bg-foreground/[0.02] p-3 transition-all", railCollapsed && "lg:hidden")}>
+                    <div
+                      className={cn(
+                        "relative z-[1] rounded-xl border border-foreground/10 bg-foreground/[0.02] p-3 transition-all",
+                        railCollapsed && "lg:hidden",
+                        profileMenuOpen && "opacity-60 blur-[2px]",
+                      )}
+                    >
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center gap-2 text-sm font-medium">
                           <Cloud className="size-4 text-[#eca8d6]" />
@@ -421,7 +612,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   const storageUsed = Number((projCount * 0.48 + 0.35).toFixed(1));
                   const isFull = storageUsed >= 4.0;
                   return (
-                    <div className={cn("hidden justify-center py-2", railCollapsed && "lg:flex")}>
+                    <div
+                      className={cn(
+                        "relative z-[1] hidden justify-center py-2",
+                        railCollapsed && "lg:flex",
+                        profileMenuOpen && "opacity-60 blur-[2px]",
+                      )}
+                    >
                       <div className="flex size-9 items-center justify-center rounded-xl border border-foreground/10 bg-foreground/[0.04] relative group hover:bg-foreground/10 transition-colors">
                         <Cloud className="size-4 text-[#eca8d6]" />
                         {isFull && (
@@ -431,6 +628,87 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     </div>
                   );
                 })()}
+
+                {/* Profile menu */}
+                <div
+                  className={cn(
+                    "relative z-10 border-t border-foreground/10 pt-3",
+                    railCollapsed && "lg:flex lg:justify-center",
+                  )}
+                >
+                  <DropdownMenu open={profileMenuOpen} onOpenChange={setProfileMenuOpen}>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        type="button"
+                        title="Profile menu"
+                        className={cn(
+                          "flex items-center gap-3 rounded-xl border px-2.5 py-2 text-sm transition-colors w-full outline-none",
+                          "border-foreground/10 bg-foreground/[0.04] hover:bg-foreground/[0.08]",
+                          "focus-visible:ring-2 focus-visible:ring-[#eca8d6]/40",
+                          (navItemActive(pathname, "/profile") || navItemActive(pathname, "/settings")) &&
+                            "bg-foreground/7 border-[#eca8d6]/25",
+                          railCollapsed && "lg:justify-center lg:px-0 lg:size-10 lg:border-transparent lg:bg-transparent",
+                        )}
+                      >
+                        <Avatar className="size-9 shrink-0">
+                          <AvatarFallback className="bg-[#eca8d6] text-background text-xs font-mono font-bold">
+                            {me ? initials(me.first_name, me.last_name, me.email) : "U"}
+                          </AvatarFallback>
+                        </Avatar>
+                        <span
+                          className={cn(
+                            "hidden lg:flex min-w-0 flex-col items-start text-left",
+                            railCollapsed && "lg:hidden",
+                          )}
+                        >
+                          <span className="font-medium leading-tight">Profile</span>
+                          <span className="text-[0.65rem] text-muted-foreground truncate max-w-[9rem]">
+                            {me?.first_name ? `${me.first_name} ${me.last_name}`.trim() : me?.email}
+                          </span>
+                        </span>
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      side={railCollapsed ? "right" : "top"}
+                      align={railCollapsed ? "end" : "start"}
+                      className="z-[100] w-52 rounded-xl border border-foreground/10 bg-background/95 backdrop-blur-xl p-1 shadow-lg"
+                    >
+                      <DropdownMenuItem asChild className="rounded-lg cursor-pointer text-[0.8rem]">
+                        <Link
+                          href="/profile"
+                          className="flex items-center gap-2"
+                          onClick={() => {
+                            if (window.innerWidth < 1024) setRailCollapsed(true);
+                          }}
+                        >
+                          <User className="size-4 text-[#eca8d6]" />
+                          View Profile
+                        </Link>
+                      </DropdownMenuItem>
+                      <DropdownMenuItem asChild className="rounded-lg cursor-pointer text-[0.8rem]">
+                        <Link
+                          href="/settings"
+                          className="flex items-center gap-2"
+                          onClick={() => {
+                            if (window.innerWidth < 1024) setRailCollapsed(true);
+                          }}
+                        >
+                          <Settings className="size-4 text-[#eca8d6]" />
+                          Open Settings
+                        </Link>
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        className="rounded-lg cursor-pointer text-[0.8rem] text-red-600 focus:text-red-600 focus:bg-red-500/10"
+                        onClick={() => void handleSignOut()}
+                      >
+                        <span className="flex items-center gap-2">
+                          <LogOut className="size-4" />
+                          Sign out
+                        </span>
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
               </div>
 
             </div>
@@ -486,41 +764,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     >
                       <Bell className="size-4 text-[#eca8d6] opacity-100" />
                     </Button>
-
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <button className="flex items-center gap-2 rounded-xl border border-foreground/10 bg-foreground/[0.03] px-2 py-1.5 hover:bg-foreground/5 transition-colors">
-                          <Avatar className="size-8">
-                            <AvatarFallback className="bg-[#eca8d6] text-background text-xs font-mono">
-                              {me ? initials(me.first_name, me.last_name, me.email) : "U"}
-                            </AvatarFallback>
-                          </Avatar>
-                          <span className="hidden sm:inline text-sm font-medium max-w-[12rem] truncate">
-                            {me?.first_name ? `${me.first_name}` : "Account"}
-                          </span>
-                        </button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="w-56">
-                        <DropdownMenuLabel className="space-y-1">
-                          <div className="text-sm font-medium leading-none">{me?.email}</div>
-                          <div className="text-xs text-muted-foreground">Signed in</div>
-                        </DropdownMenuLabel>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          onClick={async () => {
-                            try {
-                              await postJson("/api/auth/logout", {});
-                            } finally {
-                              toast.success("Signed out.");
-                              window.location.href = "/";
-                            }
-                          }}
-                        >
-                          <LogOut className="size-4" />
-                          Sign out
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
                   </div>
                 </div>
               </header>
@@ -531,6 +774,56 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
 
       {!isSupportPage && <FloatingChatSupport />}
+
+      <Dialog open={renameLibTarget !== null} onOpenChange={(o) => !o && setRenameLibTarget(null)}>
+        <DialogContent className="border-foreground/15 bg-background/90 backdrop-blur-xl sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Rename library</DialogTitle>
+            <DialogDescription>Projects in this library keep their assignments.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Input
+              value={renameLibValue}
+              onChange={(e) => setRenameLibValue(e.target.value)}
+              placeholder="Library name"
+              className="h-11 border-foreground/15 bg-foreground/[0.03]"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") confirmRenameLibrary();
+              }}
+              autoFocus
+            />
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" className="rounded-full" onClick={() => setRenameLibTarget(null)}>
+                Cancel
+              </Button>
+              <Button className="rounded-full bg-foreground text-background" onClick={confirmRenameLibrary}>
+                Save
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={deleteLibTarget !== null} onOpenChange={(o) => !o && setDeleteLibTarget(null)}>
+        <AlertDialogContent className="border-foreground/15 bg-background/95 backdrop-blur-xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete library?</AlertDialogTitle>
+            <AlertDialogDescription>
+              &quot;{deleteLibTarget}&quot; will be removed. Projects stay in your workspace; only the library folder is
+              deleted.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="rounded-full">Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="rounded-full bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={confirmDeleteLibrary}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

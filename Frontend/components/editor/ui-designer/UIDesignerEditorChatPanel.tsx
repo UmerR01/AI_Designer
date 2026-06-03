@@ -6,7 +6,14 @@ import { Paperclip, RefreshCw, Send, X, Check, Eye, ChevronDown } from "lucide-r
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { postJson } from "@/lib/auth-api";
+import { prototypeImagesSignature } from "@/lib/generated-ui-images";
+import {
+  buildFallbackFlowGraph,
+  flowScreenTotal,
+  resolveFlowScreenOrder,
+  supportsPrototypeFlow,
+  type UiFlowGraph,
+} from "@/lib/ui-flow-graph";
 import { cn } from "@/lib/utils";
 
 type ChatRole = "user" | "assistant" | "system";
@@ -31,6 +38,11 @@ type UiDesignerImage = {
   filename: string;
   page_name?: string;
   created_at?: string;
+  nodeId?: string;
+  screenName?: string;
+  isAnchor?: boolean;
+  index?: number;
+  total?: number;
 };
 
 type PendingAnchor = {
@@ -73,6 +85,28 @@ function toWsBase(backendBase: string) {
 function getImageSrc(backendBase: string, url: string) {
   if (!url) return "";
   return url.startsWith("/") ? `${backendBase}${url}` : url;
+}
+
+function isLandingPageKind(kind?: string) {
+  return (kind || "").toLowerCase().trim() === "landing page";
+}
+
+function isLandingPagePrototypeImage(img: {
+  page_name?: string;
+  filename?: string;
+  screenName?: string;
+}) {
+  const hay = `${img.page_name ?? ""} ${img.filename ?? ""} ${img.screenName ?? ""}`.toLowerCase();
+  return hay.includes("landing page") || hay.includes("landing_page");
+}
+
+function imagesForActiveScreen(
+  list: UiDesignerImage[],
+  screenId: string,
+  _projectKind?: string,
+): UiDesignerImage[] {
+  const tag = `[screenid:${screenId}]`;
+  return list.filter((img) => (img.page_name || "").toLowerCase().includes(tag));
 }
 
 function inferIntentFromPrompt(text: string): GenerationIntent {
@@ -120,7 +154,7 @@ function intentInstruction(intent: GenerationIntent): string {
   return "TARGET TYPE: AUTO";
 }
 
-/** Matches project kind string to respective WebSocket endpoint in ui_image_designer.py */
+/** Matches project kind string to respective WebSocket endpoint in backend/main.py */
 function getWsEndpointForKind(kind?: string): string {
   const k = (kind || "").toLowerCase().trim();
   if (k === "logo design") {
@@ -132,7 +166,10 @@ function getWsEndpointForKind(kind?: string): string {
   if (k === "practice") {
     return "/ws/practice";
   }
-  // Landing page, multi-page website, website design, product design, etc.
+  if (k === "landing page") {
+    return "/ws/landing_page";
+  }
+  // Multi-screen UI flow (ui/ux, website, product design, etc.)
   return "/ws/ui";
 }
 
@@ -147,17 +184,30 @@ function getPlatformForKind(kind?: string): string {
   return "auto";
 }
 
+function prototypePageName(sectionId: string, screenLabel: string) {
+  return `[SectionID:${sectionId}] ${screenLabel}`;
+}
+
 export function UIDesignerEditorChatPanel({
   projectId,
   projectKind,
+  projectGeneratedImages,
   onImagesChange,
+  onFlowGraphChange,
+  onEnsurePrototypeSection,
   activeScreenId,
   onCreateDefaultScreen,
   activeScreen,
 }: {
   projectId: string;
   projectKind?: string;
+  projectGeneratedImages?: UiDesignerImage[];
   onImagesChange?: (images: UiDesignerImage[]) => void;
+  onFlowGraphChange?: (graph: UiFlowGraph | null) => void;
+  onEnsurePrototypeSection?: (info: {
+    screenName: string;
+    nodeId?: string;
+  }) => string | null;
   activeScreenId?: string;
   onCreateDefaultScreen?: () => string;
   activeScreen?: any;
@@ -179,6 +229,14 @@ export function UIDesignerEditorChatPanel({
   const unmountedRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const skipPushToParentRef = useRef(false);
+  const lastPushedImagesSigRef = useRef("");
+  const onImagesChangeRef = useRef(onImagesChange);
+  onImagesChangeRef.current = onImagesChange;
+  const activeScreenIdRef = useRef(activeScreenId);
+  activeScreenIdRef.current = activeScreenId;
+  const pendingEditorScreenIdRef = useRef<string | null>(null);
+  const skipNextScreenImageResetRef = useRef(false);
 
   const [pendingAnchor, setPendingAnchor] = useState<PendingAnchor | null>(null);
   const [revisionText, setRevisionText] = useState("");
@@ -194,33 +252,23 @@ export function UIDesignerEditorChatPanel({
 
   useEffect(() => {
     if (images.length === 0) return;
-    onImagesChange?.(images);
-  }, [images, onImagesChange]);
+    if (skipPushToParentRef.current) {
+      skipPushToParentRef.current = false;
+      return;
+    }
+    const sig = prototypeImagesSignature(images);
+    if (sig === lastPushedImagesSigRef.current) return;
+    lastPushedImagesSigRef.current = sig;
+    onImagesChangeRef.current?.(images);
+  }, [images]);
 
-  useEffect(() => {
-    if (!projectId || images.length === 0) return;
-    let cancelled = false;
-    const timeoutId = window.setTimeout(() => {
-      if (cancelled) return;
-      void postJson(`/api/projects/${projectId}/assets`, {
-        sessionId,
-        source: "ui-designer",
-        images,
-      }).catch(() => {
-        // Non-blocking persistence path
-      });
-    }, 500);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timeoutId);
-    };
-  }, [images, projectId, sessionId]);
+  // Image persistence is handled by the project editor (assets + /data) to keep uiFlowGraph in sync.
 
-  // Per-project/per-screen UI designer session id (persisted so refresh keeps server session).
+  // Per-project session id (per-screen when available; project default before first artboard).
   useEffect(() => {
-    if (!activeScreenId) return;
+    if (!projectId) return;
     try {
-      const skey = projectSessionKey(projectId, activeScreenId);
+      const skey = projectSessionKey(projectId, activeScreenId || "default");
       let sid = window.localStorage.getItem(skey);
       if (!sid) {
         sid = createSessionId();
@@ -247,15 +295,103 @@ export function UIDesignerEditorChatPanel({
     };
   }, []);
 
+  const mergeImages = useCallback(
+    (incoming: UiDesignerImage[]) => {
+      if (!incoming?.length) return;
+      const nextImages: UiDesignerImage[] = [];
+      const set = imageIdSetRef.current;
+
+      for (const img of incoming) {
+        if (!img?.id) continue;
+        if (set.has(img.id)) continue;
+        set.add(img.id);
+        nextImages.push({ ...img, url: getImageSrc(UIDESIGNER_BACKEND_BASE, img.url) });
+      }
+      if (!nextImages.length) return;
+      setImages((prev) => [...prev, ...nextImages]);
+    },
+    [setImages],
+  );
+
+  // Hydrate chat from project-level saved images (multi-screen prototype).
+  useEffect(() => {
+    if (!supportsPrototypeFlow(projectKind) || !projectGeneratedImages?.length) return;
+    const sig = prototypeImagesSignature(projectGeneratedImages);
+    if (sig === lastPushedImagesSigRef.current) return;
+
+    const parentIds = new Set(
+      projectGeneratedImages.map((img) => img.id).filter(Boolean),
+    );
+
+    setImages((prev) => {
+      if (prototypeImagesSignature(prev) === sig) return prev;
+      const chatAhead = prev.some((img) => img.id && !parentIds.has(img.id));
+      if (chatAhead || prev.length > projectGeneratedImages.length) {
+        return prev;
+      }
+
+      const hydrated = projectGeneratedImages.map((img) => ({
+        ...img,
+        url: getImageSrc(UIDESIGNER_BACKEND_BASE, img.url),
+      }));
+
+      skipPushToParentRef.current = true;
+      lastPushedImagesSigRef.current = sig;
+      imageIdSetRef.current = new Set(
+        hydrated.map((img) => img.id).filter(Boolean) as string[],
+      );
+      return hydrated;
+    });
+  }, [projectGeneratedImages, projectKind]);
+
+  // Parent behind chat during generation — push local images up to the editor.
+  useEffect(() => {
+    if (!supportsPrototypeFlow(projectKind) || images.length === 0) return;
+    const parentIds = new Set(
+      (projectGeneratedImages ?? []).map((img) => img.id).filter(Boolean),
+    );
+    const chatAhead = images.some((img) => img.id && !parentIds.has(img.id));
+    if (!chatAhead) return;
+    const sig = prototypeImagesSignature(images);
+    if (sig === lastPushedImagesSigRef.current) return;
+    lastPushedImagesSigRef.current = sig;
+    onImagesChangeRef.current?.(images);
+  }, [images, projectGeneratedImages, projectKind]);
+
   // Load messages & images whenever activeScreenId changes!
   useEffect(() => {
     if (!activeScreenId) {
       setMessages([]);
-      setImages([]);
-      imageIdSetRef.current = new Set();
+      if (isLandingPageKind(projectKind) && projectGeneratedImages?.length) {
+        const hydrated = projectGeneratedImages.map((img) => ({
+          ...img,
+          url: getImageSrc(UIDESIGNER_BACKEND_BASE, img.url),
+        }));
+        setImages(hydrated);
+        imageIdSetRef.current = new Set(
+          hydrated.map((img) => img.id).filter(Boolean) as string[],
+        );
+      } else {
+        setImages([]);
+        imageIdSetRef.current = new Set();
+      }
       return;
     }
-    // Load messages from localStorage
+
+    if (skipNextScreenImageResetRef.current) {
+      skipNextScreenImageResetRef.current = false;
+      const msgKey = `uiDesigner.messages.${projectId}.${activeScreenId}`;
+      const storedMsg = window.localStorage.getItem(msgKey);
+      if (storedMsg) {
+        try {
+          setMessages(JSON.parse(storedMsg));
+        } catch {
+          setMessages([]);
+        }
+      }
+      return;
+    }
+
     const msgKey = `uiDesigner.messages.${projectId}.${activeScreenId}`;
     const storedMsg = window.localStorage.getItem(msgKey);
     if (storedMsg) {
@@ -268,34 +404,54 @@ export function UIDesignerEditorChatPanel({
       setMessages([]);
     }
 
-    // Load images from localStorage
+    if (supportsPrototypeFlow(projectKind) && projectGeneratedImages?.length) {
+      return;
+    }
+
+    const fromParent = projectGeneratedImages?.length
+      ? imagesForActiveScreen(
+          projectGeneratedImages.map((img) => ({
+            ...img,
+            url: getImageSrc(UIDESIGNER_BACKEND_BASE, img.url),
+          })),
+          activeScreenId,
+          projectKind,
+        )
+      : [];
+
     const imgKey = `uiDesigner.images.${projectId}.${activeScreenId}`;
     const storedImg = window.localStorage.getItem(imgKey);
     if (storedImg) {
       try {
         const parsed = JSON.parse(storedImg) as UiDesignerImage[];
-        setImages(parsed);
-        imageIdSetRef.current = new Set(parsed.map((img) => img.id).filter(Boolean) as string[]);
+        const merged = fromParent.length ? fromParent : parsed;
+        setImages(merged);
+        imageIdSetRef.current = new Set(merged.map((img) => img.id).filter(Boolean) as string[]);
       } catch {
-        setImages([]);
-        imageIdSetRef.current = new Set();
+        setImages(fromParent);
+        imageIdSetRef.current = new Set(
+          fromParent.map((img) => img.id).filter(Boolean) as string[],
+        );
       }
     } else {
-      setImages([]);
-      imageIdSetRef.current = new Set();
+      setImages(fromParent);
+      imageIdSetRef.current = new Set(
+        fromParent.map((img) => img.id).filter(Boolean) as string[],
+      );
     }
-  }, [projectId, activeScreenId]);
+  }, [projectId, activeScreenId, projectKind, projectGeneratedImages, mergeImages]);
 
-  // Save images to localStorage whenever they change
+  // Save images to localStorage whenever they change (skip for project-wide prototype flows).
   useEffect(() => {
     if (!activeScreenId) return;
+    if (supportsPrototypeFlow(projectKind)) return;
     const imgKey = `uiDesigner.images.${projectId}.${activeScreenId}`;
     try {
       window.localStorage.setItem(imgKey, JSON.stringify(images));
     } catch (e) {
       console.warn("localStorage quota exceeded for images cache", e);
     }
-  }, [images, projectId, activeScreenId]);
+  }, [images, projectId, activeScreenId, projectKind]);
 
   const addMessage = useCallback((role: ChatRole, content: string, imageUrl?: string, isStyleGuide?: boolean) => {
     const createdAt = new Date().toISOString();
@@ -315,24 +471,6 @@ export function UIDesignerEditorChatPanel({
       return updated;
     });
   }, [projectId, activeScreenId]);
-
-  const mergeImages = useCallback(
-    (incoming: UiDesignerImage[]) => {
-      if (!incoming?.length) return;
-      const nextImages: UiDesignerImage[] = [];
-      const set = imageIdSetRef.current;
-
-      for (const img of incoming) {
-        if (!img?.id) continue;
-        if (set.has(img.id)) continue;
-        set.add(img.id);
-        nextImages.push({ ...img, url: getImageSrc(UIDESIGNER_BACKEND_BASE, img.url) });
-      }
-      if (!nextImages.length) return;
-      setImages((prev) => [...prev, ...nextImages]);
-    },
-    [setImages],
-  );
 
   /** Unified WebSocket pipeline handler for sending messages & actions */
   const executeWebSocketAction = useCallback(
@@ -403,42 +541,152 @@ export function UIDesignerEditorChatPanel({
               break;
             }
 
+            case "intent": {
+              const screens = Array.isArray(data.screens) ? data.screens.join(", ") : "";
+              addMessage(
+                "assistant",
+                `Detected: ${data.intent || "ui"} · ${data.platform || "web"}${screens ? ` · Screens: ${screens}` : ""}`,
+              );
+              break;
+            }
+
             case "anchor_preview": {
+              const screenLabel = data.screen || "Anchor Screen";
+              const remaining = data.remaining_screens || [];
+              const totalScreens =
+                data.screen_graph?.nodes?.length || remaining.length + 1;
+              const graph: UiFlowGraph =
+                data.screen_graph ||
+                buildFallbackFlowGraph(screenLabel, remaining);
+              onFlowGraphChange?.(graph);
+
+              const usePrototypeCanvas = supportsPrototypeFlow(projectKind);
+              const sectionId = usePrototypeCanvas
+                ? onEnsurePrototypeSection?.({
+                    screenName: screenLabel,
+                    nodeId: data.node_id || "",
+                  })
+                : null;
+              const pageName =
+                sectionId != null
+                  ? prototypePageName(sectionId, screenLabel)
+                  : activeScreenId
+                    ? `[ScreenID:${activeScreenId}] ${screenLabel}`
+                    : screenLabel;
+
+              const flowOrder =
+                resolveFlowScreenOrder(graph, {
+                  nodeId: data.node_id || "",
+                  screenName: screenLabel,
+                }) ?? 1;
+              const flowTotal = flowScreenTotal(graph) || totalScreens;
+
               const newImg: UiDesignerImage = {
                 id: crypto.randomUUID(),
                 url: `data:image/png;base64,${data.image_b64}`,
                 filename: data.filename || "anchor.png",
-                page_name: activeScreenId ? `[ScreenID:${activeScreenId}] ${data.screen || "Anchor Screen"}` : (data.screen || "Anchor Screen"),
+                page_name: pageName,
+                screenName: screenLabel,
+                nodeId: data.node_id || "",
+                isAnchor: true,
+                index: flowOrder,
+                total: flowTotal,
                 created_at: new Date().toISOString(),
               };
               setImages((prev) => [...prev, newImg]);
               setPendingAnchor({
                 image_b64: data.image_b64,
                 filename: data.filename || "anchor.png",
-                screen: data.screen || "Anchor Screen",
+                screen: screenLabel,
                 platform: data.platform || "desktop",
-                remaining_screens: data.remaining_screens || [],
+                remaining_screens: remaining,
               });
               addMessage(
                 "assistant",
-                `⚓ Anchor screen generated: "${data.screen || "Dashboard"}". Let's verify the aesthetic. Do you want to Approve or Revise it?`
+                `⚓ Anchor screen generated: "${screenLabel}". Approve to generate remaining screens${remaining.length ? `: ${remaining.join(", ")}` : ""}.`,
               );
               break;
             }
 
             case "screen": {
+              const screenLabel = data.name || `Screen ${data.index}`;
+              const graph: UiFlowGraph | undefined = data.screen_graph;
+              if (graph?.nodes?.length) {
+                onFlowGraphChange?.(graph);
+              }
+              const usePrototypeCanvas = supportsPrototypeFlow(projectKind);
+              const sectionId = usePrototypeCanvas
+                ? onEnsurePrototypeSection?.({
+                    screenName: screenLabel,
+                    nodeId: data.node_id || "",
+                  })
+                : null;
+              const pageName =
+                sectionId != null
+                  ? prototypePageName(sectionId, screenLabel)
+                  : activeScreenId
+                    ? `[ScreenID:${activeScreenId}] ${screenLabel}`
+                    : screenLabel;
+
+              const flowOrder = resolveFlowScreenOrder(graph, {
+                nodeId: data.node_id || "",
+                screenName: screenLabel,
+              });
+              const flowTotal = flowScreenTotal(graph);
+
               const newImg: UiDesignerImage = {
                 id: crypto.randomUUID(),
                 url: `data:image/png;base64,${data.image_b64}`,
                 filename: data.filename || `screen_${data.index}.png`,
-                page_name: activeScreenId ? `[ScreenID:${activeScreenId}] ${data.name || `Screen ${data.index}`}` : (data.name || `Screen ${data.index}`),
+                page_name: pageName,
+                screenName: screenLabel,
+                nodeId: data.node_id || "",
+                index: flowOrder,
+                total: flowTotal || undefined,
                 created_at: new Date().toISOString(),
               };
               setImages((prev) => [...prev, newImg]);
               addMessage(
                 "assistant",
-                `✨ Screen generated: "${data.name || `Screen ${data.index}`}"`
+                `✨ Screen generated: "${screenLabel}"`,
               );
+              break;
+            }
+
+            case "landing_page": {
+              let screenId =
+                pendingEditorScreenIdRef.current ||
+                activeScreenIdRef.current ||
+                "";
+              if (!screenId && onCreateDefaultScreen) {
+                screenId = onCreateDefaultScreen();
+                skipNextScreenImageResetRef.current = true;
+              }
+              const pageName = screenId
+                ? `[ScreenID:${screenId}] Landing Page Prototype`
+                : "Landing Page Prototype";
+              const imageUrl = `data:image/png;base64,${data.image_b64}`;
+              const newImg: UiDesignerImage = {
+                id: crypto.randomUUID(),
+                url: imageUrl,
+                filename: data.filename || "landing_page_prototype.png",
+                page_name: pageName,
+                screenName: "Landing Page",
+                created_at: new Date().toISOString(),
+              };
+              setImages((prev) => {
+                const withoutDup = prev.filter(
+                  (img) => !isLandingPagePrototypeImage(img),
+                );
+                return [...withoutDup, newImg];
+              });
+              onFlowGraphChange?.(null);
+              addMessage(
+                "assistant",
+                "🏁 Landing page prototype generated (split artboard).",
+                imageUrl,
+              );
+              pendingEditorScreenIdRef.current = null;
               break;
             }
 
@@ -499,7 +747,14 @@ export function UIDesignerEditorChatPanel({
         setIsGenerating(false);
       }
     },
-    [projectKind, addMessage, activeScreenId],
+    [
+      projectKind,
+      addMessage,
+      activeScreenId,
+      onFlowGraphChange,
+      onEnsurePrototypeSection,
+      onCreateDefaultScreen,
+    ],
   );
 
   const onPickFile = useCallback(() => {
@@ -572,7 +827,10 @@ export function UIDesignerEditorChatPanel({
     let currentActiveId = activeScreenId;
     if (!currentActiveId && onCreateDefaultScreen) {
       currentActiveId = onCreateDefaultScreen();
+      skipNextScreenImageResetRef.current = true;
+      activeScreenIdRef.current = currentActiveId;
     }
+    pendingEditorScreenIdRef.current = currentActiveId || null;
 
     addMessage("user", text);
     setDraft("");
@@ -604,6 +862,7 @@ export function UIDesignerEditorChatPanel({
       project_id: projectId,
       query: finalMessage,
       platform: getPlatformForKind(projectKind),
+      editor_screen_id: currentActiveId || undefined,
       width: activeScreen?.width,
       height: activeScreen?.height,
       format_label: activeScreen?.formatLabel,

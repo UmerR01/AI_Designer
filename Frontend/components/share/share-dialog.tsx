@@ -130,6 +130,10 @@ export function ShareDialog({
             <DialogTitle className="font-display text-2xl tracking-tight">Share design</DialogTitle>
             <DialogDescription className="text-sm">
               Control access to <span className="text-foreground/90 font-medium">{projectName}</span>.
+              <span className="block mt-1 text-muted-foreground">
+                <strong className="text-foreground/80 font-medium">Can view</strong> — gallery with downloads only.
+                <strong className="text-foreground/80 font-medium"> Can edit</strong> — opens this project in the editor.
+              </span>
             </DialogDescription>
           </DialogHeader>
 

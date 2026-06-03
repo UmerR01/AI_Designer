@@ -33,6 +33,10 @@ export async function middleware(req: NextRequest) {
   if (!token) {
     const url = req.nextUrl.clone();
     url.pathname = "/login";
+    const returnPath = `${pathname}${req.nextUrl.search}`;
+    if (returnPath && returnPath !== "/login") {
+      url.searchParams.set("next", returnPath);
+    }
     return NextResponse.redirect(url);
   }
 
@@ -40,6 +44,10 @@ export async function middleware(req: NextRequest) {
   if (!user) {
     const url = req.nextUrl.clone();
     url.pathname = "/login";
+    const returnPath = `${pathname}${req.nextUrl.search}`;
+    if (returnPath && returnPath !== "/login") {
+      url.searchParams.set("next", returnPath);
+    }
     return NextResponse.redirect(url);
   }
 

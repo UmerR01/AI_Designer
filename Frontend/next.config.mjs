@@ -27,6 +27,7 @@ const nextConfig = {
     serverActions: {
       bodySizeLimit: "200mb",
     },
+    proxyClientMaxBodySize: "200mb",
   },
   middlewareClientMaxBodySize: "200mb",
 }
