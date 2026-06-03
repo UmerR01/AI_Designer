@@ -114,6 +114,7 @@
     font-family: var(--serif);
     font-style: italic;
     background: linear-gradient(135deg, var(--accent), var(--accent2));
+    background-clip: text;
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
   }
@@ -354,6 +355,15 @@
     scrollbar-width: thin;
     scrollbar-color: var(--border) transparent;
   }
+  .canvas-item-shell {
+    width: 100%;
+    align-self: stretch;
+    display: block;
+  }
+  .canvas-item-shell > * {
+    width: 100%;
+    max-width: 100%;
+  }
 
   /* Welcome state */
   .welcome {
@@ -399,7 +409,7 @@
     letter-spacing: -1px;
     line-height: 1.1;
   }
-  .welcome h1 span { font-family: var(--serif); font-style: italic; background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .welcome h1 span { font-family: var(--serif); font-style: italic; background: linear-gradient(135deg, var(--accent), var(--accent2)); background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
 
   .welcome p { font-size: 15px; color: var(--text-muted); max-width: 400px; line-height: 1.7; }
 
@@ -490,6 +500,11 @@
 
   /* Style guide / screen result card */
   .result-card {
+    width: 100%;
+    max-width: 1120px;
+    align-self: stretch;
+    display: flex;
+    flex-direction: column;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -500,9 +515,12 @@
   .result-card:hover { border-color: var(--border-hover); }
 
   .result-card-header {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
     padding: 14px 18px;
     border-bottom: 1px solid var(--border);
   }
@@ -528,7 +546,7 @@
   .badge-logo { background: rgba(74,222,128,0.15); color: var(--success); }
   .badge-social { background: rgba(192,132,252,0.15); color: var(--accent2); }
 
-  .card-actions { display: flex; gap: 6px; }
+  .card-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
   .card-btn {
     padding: 5px 12px;
     border-radius: 6px;
@@ -553,21 +571,56 @@
   .card-btn.approve:hover { background: rgba(74,222,128,0.15); }
 
   .result-img {
+    flex-shrink: 0;
     width: 100%;
     display: block;
     background: var(--bg);
-    height: auto;
     object-fit: contain;
-    min-height: 220px;
+    min-height: 320px;
+    max-height: min(76vh, 820px);
     background: linear-gradient(180deg,#0b0b0d, #111);
+  }
+  .landing-preview .result-img {
+    min-height: 420px;
+    max-height: min(88vh, 1020px);
   }
 
   /* Screens grid */
   .screens-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
     gap: 16px;
     padding: 18px;
+    align-items: stretch;
+  }
+  .screens-stage {
+    position: relative;
+    min-height: 320px;
+    flex-shrink: 0;
+  }
+  .flow-lines {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 0;
+    overflow: visible;
+  }
+  .flow-lines path {
+    fill: none;
+    stroke: rgba(124,108,255,0.8);
+    stroke-width: 2.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .flow-lines path.flow-backdrop {
+    stroke: rgba(124,108,255,0.18);
+    stroke-width: 8;
+    filter: blur(1px);
+  }
+  .flow-lines marker path {
+    fill: rgba(124,108,255,0.95);
   }
   .screen-thumb {
     border-radius: var(--radius-sm);
@@ -577,10 +630,23 @@
     transition: all 0.2s;
     position: relative;
     background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    min-height: 320px;
   }
   .screen-thumb:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
-  .screen-thumb img { width: 100%; display: block; }
+  .screen-thumb img {
+    width: 100%;
+    display: block;
+    flex: 1;
+    min-height: 240px;
+    object-fit: contain;
+    background: linear-gradient(180deg,#0b0b0d, #111);
+  }
+  .screen-thumb[data-node-id] { position: relative; z-index: 1; }
+  .screen-thumb.anchor-thumb { border-color: rgba(251,191,36,0.35); }
   .screen-thumb-label {
+    flex-shrink: 0;
     padding: 8px 12px;
     font-size: 11px;
     font-weight: 600;
@@ -592,6 +658,25 @@
     justify-content: space-between;
   }
   .screen-num { color: var(--text-dim); }
+
+  .screens-stage > .screens-grid {
+    position: relative;
+    z-index: 1;
+  }
+
+  @media (max-width: 1100px) {
+    .result-card { max-width: 100%; }
+    .screens-grid { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  }
+
+  @media (max-width: 820px) {
+    .result-card-header { align-items: flex-start; }
+    .card-actions { width: 100%; justify-content: flex-start; }
+    .result-img { min-height: 260px; max-height: 66vh; }
+    .screens-grid { grid-template-columns: 1fr; }
+    .screen-thumb { min-height: 280px; }
+    .screen-thumb img { min-height: 220px; }
+  }
 
   /* Anchor preview special */
   .anchor-preview {
@@ -993,6 +1078,7 @@
   </a>
   <nav>
     <button class="nav-tab active" onclick="switchTab(this,'ui')">UI Flow</button>
+    <button class="nav-tab" onclick="switchTab(this,'landing_page')">Landing</button>
     <button class="nav-tab" onclick="switchTab(this,'logo')">Logo</button>
     <button class="nav-tab" onclick="switchTab(this,'illustration')">Illustration</button>
     <button class="nav-tab" onclick="switchTab(this,'social_media')">Social</button>
@@ -1152,16 +1238,19 @@ const state = {
   platform: 'mobile',
   sessionId: null,
   serverBase: 'ws://localhost:8001',
+  wsUrl: null,
   ws: null,
   generating: false,
   refImageB64: null,
   pendingAnchor: null,   // { image_b64, screen, filename, remaining_screens }
+  flowGraph: null,
   styleGuideB64: null,
   eventCount: 0,
 };
 
 const MODES = [
   { id:'ui',            icon:'🖥️',  label:'UI Flow',      desc:'Multi-screen design flows',     badge:'FLOW',   endpoint:'/ws/ui' },
+  { id:'landing_page',  icon:'🏁',   label:'Landing Page', desc:'Split-artboard landing prototypes', badge:'LAND', endpoint:'/ws/landing_page' },
   { id:'logo',          icon:'✦',   label:'Logo',          desc:'Brand identity & logo design',  badge:'BRAND',  endpoint:'/ws/logo' },
   { id:'illustration',  icon:'🎨',  label:'Illustration',  desc:'Custom visual illustrations',   badge:'ART',    endpoint:'/ws/illustration' },
   { id:'social_media',  icon:'📲',  label:'Social Media',  desc:'Posts for Instagram, Twitter',  badge:'POST',   endpoint:'/ws/social_media' },
@@ -1174,6 +1263,7 @@ window.onload = () => {
   updateSessionDisplay();
   renderModeList();
   updateHints();
+  window.addEventListener('resize', () => requestAnimationFrame(renderFlowConnections));
 };
 
 function generateId() {
@@ -1197,6 +1287,10 @@ function renderModeList() {
 // ─── MODE & PLATFORM ─────────────────────────────────────────────────────────
 function setMode(id) {
   state.mode = id;
+  if (id === 'landing_page') {
+    state.platform = 'web';
+    syncPlatformSelection('web');
+  }
   renderModeList();
   updateHints();
   switchTab(document.querySelector(`.nav-tab[onclick*="${id}"]`), id);
@@ -1209,10 +1303,16 @@ function switchTab(btn, mode) {
 }
 
 function setPlatform(btn, p) {
-  document.querySelectorAll('.platform-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
+  syncPlatformSelection(p);
   state.platform = p;
   updateHints();
+}
+
+function syncPlatformSelection(platform) {
+  document.querySelectorAll('.platform-btn').forEach(b => b.classList.remove('active'));
+  const title = { mobile: 'Mobile', web: 'Web', tablet: 'Tablet' }[platform] || 'Web';
+  const button = Array.from(document.querySelectorAll('.platform-btn')).find(b => b.title === title);
+  if (button) button.classList.add('active');
 }
 
 function updateHints() {
@@ -1236,8 +1336,10 @@ function updateSessionDisplay() {
 
 function newSession() {
   if (state.ws) { try { state.ws.close(); } catch(e){} state.ws = null; }
+  state.wsUrl = null;
   state.sessionId = generateId();
   state.pendingAnchor = null;
+  state.flowGraph = null;
   state.styleGuideB64 = null;
   state.refImageB64 = null;
   clearCanvas();
@@ -1259,6 +1361,7 @@ function clearCanvas() {
       <p>Describe your app, choose a platform, and watch Morphic build your entire design system.</p>
       <div class="quick-prompts">
         <button class="quick-chip" onclick="useQuickPrompt('A fintech mobile app for tracking investments and portfolios')">💰 Fintech app</button>
+        <button class="quick-chip" onclick="useQuickPrompt('A premium SaaS landing page with hero, features, testimonials, pricing, and footer')">🏁 Landing page</button>
         <button class="quick-chip" onclick="useQuickPrompt('Social media platform mobile app with stories and reels')">📱 Social app</button>
         <button class="quick-chip" onclick="useQuickPrompt('SaaS analytics dashboard for e-commerce businesses')">📊 Analytics SaaS</button>
         <button class="quick-chip" onclick="useQuickPrompt('Health & fitness tracking mobile app with meal plans')">🏃 Fitness app</button>
@@ -1348,7 +1451,7 @@ function setConnStatus(status, url='') {
 // ─── EVENTS LOG ──────────────────────────────────────────────────────────────
 const EVENT_ICONS = {
   status:'⚙️', style_guide:'🎨', anchor_preview:'⚓', screen:'🖼️',
-  logo:'✦', illustration:'🖌️', social_media:'📲', assistant_message:'💬',
+  landing_page:'🏁', logo:'✦', illustration:'🖌️', social_media:'📲', assistant_message:'💬',
   done:'✅', error:'❌', intent:'🔍'
 };
 
@@ -1388,9 +1491,10 @@ function hideWelcome() {
 
 function appendToCanvas(html) {
   const canvas = document.getElementById('canvasArea');
-  const div = document.createElement('div');
-  div.innerHTML = html;
-  canvas.appendChild(div.firstElementChild || div);
+  const shell = document.createElement('div');
+  shell.className = 'canvas-item-shell';
+  shell.innerHTML = html;
+  canvas.appendChild(shell);
   canvas.scrollTop = canvas.scrollHeight;
 }
 
@@ -1464,12 +1568,25 @@ async function sendMessage() {
 }
 
 function connectAndSend(wsUrl, payload) {
+  if (state.ws && state.ws.readyState === WebSocket.OPEN && state.wsUrl === wsUrl) {
+    state.ws.send(JSON.stringify(payload));
+    showProgress('Sending request over existing session…');
+    logEvent('send', { url: wsUrl });
+    return;
+  }
+
+  if (state.ws && state.ws.readyState === WebSocket.CONNECTING) {
+    try { state.ws.close(); } catch(e){}
+  }
+
   setConnStatus('connecting', wsUrl);
+  state.wsUrl = wsUrl;
   document.getElementById('wsUrlDisplay').innerHTML = `<strong>…/${wsUrl.split('/').pop()}</strong>`;
 
   try {
     const ws = new WebSocket(wsUrl);
     state.ws = ws;
+    state.wsUrl = wsUrl;
 
     ws.onopen = () => {
       setConnStatus('connected', wsUrl);
@@ -1495,6 +1612,7 @@ function connectAndSend(wsUrl, payload) {
       if (state.ws === ws) {
         setConnStatus('disconnected');
         state.ws = null;
+        state.wsUrl = null;
       }
     };
   } catch(e) {
@@ -1565,6 +1683,8 @@ function handleServerEvent(data) {
     case 'anchor_preview': {
       removeProgressIndicator();
       state.pendingAnchor = data;
+      state.flowGraph = data.screen_graph || buildFallbackFlowGraph(data.screen || 'Anchor', data.remaining_screens || []);
+      state.pendingAnchor.totalScreens = (state.flowGraph?.nodes?.length || (data.remaining_screens || []).length + 1);
       updateSessionDisplay();
       const remaining = data.remaining_screens || [];
       appendToCanvas(`
@@ -1591,13 +1711,54 @@ function handleServerEvent(data) {
           </div>
         </div>
       `);
+      ensureScreensGallery(state.pendingAnchor.totalScreens);
+      appendGalleryThumb({
+        image_b64: data.image_b64,
+        name: data.screen || 'Anchor',
+        filename: data.filename || 'anchor.png',
+        index: 1,
+        total: state.pendingAnchor.totalScreens,
+        isAnchor: true,
+        nodeId: data.node_id || '',
+      });
+      scheduleFlowRender();
       break;
     }
 
     case 'screen':
       removeProgressIndicator();
       state.generatedCount = (state.generatedCount || 0) + 1;
+      if (data.screen_graph) state.flowGraph = data.screen_graph;
+      appendToCanvas(`
+        <div class="message ai">
+          <div class="msg-avatar ai">◈</div>
+          <div class="msg-content">
+            <div class="msg-bubble">Generated screen <strong>${state.generatedCount}</strong>: ${escHtml(data.name || 'Screen')}</div>
+          </div>
+        </div>
+      `);
       renderScreen(data);
+      scheduleFlowRender();
+      break;
+
+    case 'landing_page':
+      removeProgressIndicator();
+      appendToCanvas(`
+        <div class="result-card landing-preview">
+          <div class="result-card-header">
+            <div class="result-card-label">
+              🏁 Landing Page Prototype
+              <span class="label-badge badge-guide">SPLIT ARTBOARDS</span>
+            </div>
+            <div class="card-actions">
+              <button class="card-btn" onclick="downloadImage('${data.image_b64}','${data.filename||'landing_page_prototype.png'}')">⬇ Save</button>
+              <button class="card-btn" onclick="openZoom('data:image/png;base64,${data.image_b64}')">⤢ Expand</button>
+              <button class="card-btn" onclick="setAsReference('${data.image_b64}','${data.filename||'landing_page_prototype.png'}')">↩ Use as Ref</button>
+            </div>
+          </div>
+          <img class="result-img" src="data:image/png;base64,${data.image_b64}" alt="Landing Page Prototype" onclick="openZoom('data:image/png;base64,${data.image_b64}')" style="cursor:zoom-in;">
+        </div>
+      `);
       break;
 
     case 'logo':
@@ -1682,7 +1843,18 @@ let _screenBuffer = [];
 let _screenContainerId = null;
 
 function renderScreen(data) {
-  // Group screens into a card
+  ensureScreensGallery(state.pendingAnchor?.totalScreens || 0);
+  appendGalleryThumb({
+    image_b64: data.image_b64,
+    name: data.name || 'Screen',
+    filename: data.filename || 'screen.png',
+    index: data.index,
+    total: state.pendingAnchor?.totalScreens || 0,
+    nodeId: data.node_id || '',
+  });
+}
+
+function ensureScreensGallery(total) {
   if (!_screenContainerId || !document.getElementById(_screenContainerId)) {
     _screenContainerId = 'screens-' + Date.now();
     _screenBuffer = [];
@@ -1697,25 +1869,124 @@ function renderScreen(data) {
             <button class="card-btn" onclick="downloadAllScreens('${_screenContainerId}')">⬇ Download All</button>
           </div>
         </div>
-        <div class="screens-grid" id="grid-${_screenContainerId}"></div>
+        <div class="screens-stage" id="stage-${_screenContainerId}">
+          <svg class="flow-lines" id="flow-${_screenContainerId}" aria-hidden="true"></svg>
+          <div class="screens-grid" id="grid-${_screenContainerId}"></div>
+        </div>
       </div>
     `);
   }
+}
 
-  _screenBuffer.push(data);
+function appendGalleryThumb({ image_b64, name, filename, index, total, isAnchor = false, nodeId = '' }) {
+  if (!_screenContainerId) return;
   const grid = document.getElementById(`grid-${_screenContainerId}`);
-  if (grid) {
-    const thumb = document.createElement('div');
-    thumb.className = 'screen-thumb';
-    thumb.innerHTML = `
-      <img src="data:image/png;base64,${data.image_b64}" alt="${escHtml(data.name||'Screen')}" onclick="openZoom('data:image/png;base64,${data.image_b64}')">
-      <div class="screen-thumb-label">
-        <span>${escHtml(data.name || 'Screen')}</span>
-        <span class="screen-num">#${(data.index ?? _screenBuffer.length - 1) + 1}${state.pendingAnchor?.remaining_screens ? '/' + (state.pendingAnchor.remaining_screens.length + 1) : ''}</span>
-      </div>
-    `;
-    grid.appendChild(thumb);
+  if (!grid) return;
+
+  const thumb = document.createElement('div');
+  thumb.className = 'screen-thumb' + (isAnchor ? ' anchor-thumb' : '');
+  if (nodeId) thumb.dataset.nodeId = nodeId;
+  const position = index || (_screenBuffer.length + 1);
+  const suffix = total ? `/${total}` : '';
+  thumb.innerHTML = `
+    <img src="data:image/png;base64,${image_b64}" alt="${escHtml(name || 'Screen')}" onclick="openZoom('data:image/png;base64,${image_b64}')">
+    <div class="screen-thumb-label">
+      <span>${escHtml(isAnchor ? 'Anchor' : (name || 'Screen'))}</span>
+      <span class="screen-num">#${position}${suffix}</span>
+    </div>
+  `;
+  grid.appendChild(thumb);
+  _screenBuffer.push({ image_b64, name, filename, index: position, total, isAnchor });
+
+  const container = document.getElementById(_screenContainerId);
+  if (container) {
+    container.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
+}
+
+function slugifyFlowName(value) {
+  return String(value || 'screen').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'screen';
+}
+
+function buildFallbackFlowGraph(anchorName, remainingScreens) {
+  const screens = [anchorName, ...(remainingScreens || [])].filter(Boolean);
+  const nodes = screens.map((screen, index) => ({
+    id: `${slugifyFlowName(screen)}_${index + 1}`,
+    screen,
+    label: screen,
+    order: index + 1,
+  }));
+  const relations = nodes.slice(1).map((node, index) => ({
+    from: nodes[index].id,
+    to: node.id,
+    type: index === 0 ? 'entry' : 'next',
+    label: index === 0 ? 'next screen' : 'continues to',
+  }));
+  return { nodes, relations };
+}
+
+function scheduleFlowRender() {
+  if (state._flowRenderQueued) return;
+  state._flowRenderQueued = true;
+  requestAnimationFrame(() => {
+    state._flowRenderQueued = false;
+    renderFlowConnections();
+  });
+}
+
+function renderFlowConnections() {
+  if (!_screenContainerId || !state.flowGraph?.relations?.length) return;
+
+  const stage = document.getElementById(`stage-${_screenContainerId}`);
+  const svg = document.getElementById(`flow-${_screenContainerId}`);
+  const grid = document.getElementById(`grid-${_screenContainerId}`);
+  if (!stage || !svg || !grid) return;
+
+  const stageRect = stage.getBoundingClientRect();
+  if (!stageRect.width || !stageRect.height) return;
+
+  svg.setAttribute('viewBox', `0 0 ${stageRect.width} ${stageRect.height}`);
+  svg.setAttribute('width', stageRect.width);
+  svg.setAttribute('height', stageRect.height);
+  svg.innerHTML = `
+    <defs>
+      <marker id="flowArrow-${_screenContainerId}" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L12,6 L0,12 z"></path>
+      </marker>
+    </defs>
+  `;
+
+  const thumbs = Array.from(grid.querySelectorAll('.screen-thumb[data-node-id]'));
+  const thumbById = new Map(thumbs.map(el => [el.dataset.nodeId, el]));
+  const relations = state.flowGraph.relations || state.flowGraph.edges || [];
+
+  relations.forEach(rel => {
+    const source = thumbById.get(rel.from);
+    const target = thumbById.get(rel.to);
+    if (!source || !target) return;
+
+    const sourceRect = source.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const x1 = sourceRect.left + sourceRect.width / 2 - stageRect.left;
+    const y1 = sourceRect.bottom - stageRect.top;
+    const x2 = targetRect.left + targetRect.width / 2 - stageRect.left;
+    const y2 = targetRect.top - stageRect.top;
+    const bend = Math.max(56, Math.abs(y2 - y1) * 0.4);
+    const path = `M ${x1} ${y1} C ${x1} ${y1 + bend} ${x2} ${y2 - bend} ${x2} ${y2}`;
+
+    const backdrop = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    backdrop.setAttribute('d', path);
+    backdrop.setAttribute('class', 'flow-backdrop');
+    backdrop.setAttribute('marker-end', `url(#flowArrow-${_screenContainerId})`);
+
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    line.setAttribute('d', path);
+    line.setAttribute('marker-end', `url(#flowArrow-${_screenContainerId})`);
+    line.setAttribute('data-relation', rel.type || 'next');
+
+    svg.appendChild(backdrop);
+    svg.appendChild(line);
+  });
 }
 
 // ─── ANCHOR ACTIONS ───────────────────────────────────────────────────────────
@@ -1725,7 +1996,6 @@ function approveAnchor() {
 
   const endpoint = MODES.find(m => m.id === 'ui')?.endpoint || '/ws/ui';
   const wsUrl = state.serverBase + endpoint;
-  _screenContainerId = null;
 
   const payload = {
     session_id: state.sessionId,

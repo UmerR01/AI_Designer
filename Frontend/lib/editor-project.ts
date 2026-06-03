@@ -25,6 +25,8 @@ export type EditorTreeNode =
  * Standard Design Resolutions (Standard 1X)
  */
 export const RESOLUTIONS = {
+  /** Split left/right artboards from backend `generate_landing_page_prototype` (~1376×768). */
+  LANDING_PAGE: { w: 1376, h: 768 },
   WEBSITE: {
     DESKTOP: { w: 1440, h: 900 },
     MOBILE: { w: 393, h: 852 },
@@ -88,6 +90,57 @@ export function isDefaultUiUxBootstrapTree(tree: EditorTreeNode[]): boolean {
   if (n.children.length !== 1) return false;
   const c = n.children[0];
   return c.kind === "screen" && c.id === S_UX_1 && c.name === "Screen 1";
+}
+
+/** Any screen node in the tree (top-level or inside folders). */
+export function treeHasScreens(tree: EditorTreeNode[]): boolean {
+  return countScreensInTree(tree) > 0;
+}
+
+export function countScreensInTree(tree: EditorTreeNode[]): number {
+  let count = 0;
+  for (const n of tree) {
+    if (n.kind === "screen") count += 1;
+    else if (n.kind === "folder") {
+      count += n.children.filter((c) => c.kind === "screen").length;
+    }
+  }
+  return count;
+}
+
+export function collectScreens(tree: EditorTreeNode[]): Extract<EditorTreeNode, { kind: "screen" }>[] {
+  const out: Extract<EditorTreeNode, { kind: "screen" }>[] = [];
+  for (const n of tree) {
+    if (n.kind === "screen") out.push(n);
+    else if (n.kind === "folder") {
+      for (const c of n.children) {
+        if (c.kind === "screen") out.push(c);
+      }
+    }
+  }
+  return out;
+}
+
+export function collectScreenIdsInTree(tree: EditorTreeNode[]): string[] {
+  return collectScreens(tree).map((s) => s.id);
+}
+
+/** Auto-created placeholder screen with no designs — treat as empty project. */
+export function isBlankStarterTree(tree: EditorTreeNode[]): boolean {
+  const screens = collectScreens(tree);
+  if (screens.length !== 1) return false;
+  const s = screens[0];
+  const name = (s.name || "").trim().toLowerCase();
+  const isGenericName =
+    name === "untitled" ||
+    name.startsWith("untitled ") ||
+    name === "screen 1";
+  const sections = s.sections ?? [];
+  const onlyDefaultSection =
+    sections.length === 0 ||
+    (sections.length === 1 &&
+      /^(first section|main panel|base)$/i.test((sections[0].name || "").trim()));
+  return isGenericName && onlyDefaultSection;
 }
 
 export function getEditorBootstrap(kind: ProjectKind): EditorBootstrap {

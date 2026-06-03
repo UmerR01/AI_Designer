@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { requireUser } from "@/lib/auth/server";
-import { canRead, getUserRoleForProject } from "@/lib/projects/authz";
+import { cookies } from "next/headers";
 import { sql } from "@/lib/db";
+import { getOptionalUser } from "@/lib/auth/server";
+import { shareUnlockCookieName, verifyShareUnlock } from "@/lib/auth/share";
 
 export const dynamic = "force-dynamic";
 
@@ -10,28 +11,56 @@ function safeFilename(name: string) {
   return `${n || "design"}.png`;
 }
 
-/** Download a single project asset as PNG (optional ?assetId=). */
-export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
-  const user = await requireUser().catch(() => null);
-  if (!user) return NextResponse.json({ detail: "Unauthorized." }, { status: 401 });
+async function resolveShareLink(slug: string) {
+  const links = await sql()<{
+    id: string;
+    project_id: string;
+    role: "viewer" | "editor";
+    visibility: "public" | "password";
+    revoked_at: string | null;
+  }>`
+    select id, project_id, role, visibility, revoked_at
+    from project_share_links
+    where slug = ${slug}
+    limit 1
+  `;
+  const link = links[0];
+  if (!link || link.revoked_at) return null;
 
-  const { id: projectId } = await ctx.params;
-  const role = await getUserRoleForProject(user.id, projectId);
-  if (!role || !canRead(role)) return NextResponse.json({ detail: "Not found." }, { status: 404 });
+  if (link.visibility === "password") {
+    const token = (await cookies()).get(shareUnlockCookieName(slug))?.value;
+    if (!token) return null;
+    const payload = await verifyShareUnlock(token);
+    if (!payload || payload.slug !== slug) return null;
+  }
+
+  return link;
+}
+
+/** Public download proxy for view-only share links (no login). */
+export async function GET(req: Request, ctx: { params: Promise<{ slug: string }> }) {
+  const { slug } = await ctx.params;
+  const link = await resolveShareLink(slug);
+  if (!link) return NextResponse.json({ detail: "Not found." }, { status: 404 });
+
+  if (link.role === "editor") {
+    const user = await getOptionalUser();
+    if (!user) {
+      return NextResponse.json({ detail: "Unauthorized." }, { status: 401 });
+    }
+  }
 
   const { searchParams } = new URL(req.url);
   const assetId = searchParams.get("assetId");
 
   const assets = await sql()<{
     id: string;
-    page_name: string | null;
     filename: string;
     url: string;
-    created_at: string;
   }>`
-    select id, page_name, filename, url, created_at
+    select id, filename, url
     from project_assets
-    where project_id = ${projectId}
+    where project_id = ${link.project_id}
     order by created_at desc
   `;
 

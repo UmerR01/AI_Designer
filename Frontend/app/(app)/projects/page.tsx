@@ -2,10 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeft, Brush, Layout, Megaphone, PenTool, Plus, Target, Trash2, LayoutGrid, Monitor, Smartphone, Package } from "lucide-react";
+import { ArrowLeft, Layout, Library, Megaphone, PenTool, Plus, Target, Trash2, LayoutGrid, Monitor, Smartphone, Package } from "lucide-react";
 import { toast } from "sonner";
 
 import { FolderCard } from "@/components/app/folder-card";
+import { ShareDialog } from "@/components/share/share-dialog";
 import { cn } from "@/lib/utils";
 import {
   AlertDialog,
@@ -40,21 +41,31 @@ export default function ProjectsPage() {
   const [libsData, setLibsData] = useState<Record<string, string[]>>({});
   const [libsList, setLibsList] = useState<string[]>([]);
 
-  useEffect(() => {
+  const loadLocalCatalog = () => {
     try {
       const favs = localStorage.getItem("designer.favorites");
       if (favs) setFavorites(JSON.parse(favs));
-    } catch (e) {}
-
+    } catch {
+      // ignore
+    }
     try {
       const libs = localStorage.getItem("designer.libraries");
       if (libs) setLibsData(JSON.parse(libs));
-    } catch (e) {}
-
+    } catch {
+      // ignore
+    }
     try {
       const list = localStorage.getItem("designer.libraries_list");
       if (list) setLibsList(JSON.parse(list));
-    } catch (e) {}
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    loadLocalCatalog();
+    window.addEventListener("storage", loadLocalCatalog);
+    return () => window.removeEventListener("storage", loadLocalCatalog);
   }, []);
 
   const saveFavorites = (newFavs: string[]) => {
@@ -108,8 +119,11 @@ export default function ProjectsPage() {
   const [renameTarget, setRenameTarget] = useState<DesignerProject | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
+  const [libraryTarget, setLibraryTarget] = useState<DesignerProject | null>(null);
+
   const [deleteTarget, setDeleteTarget] = useState<DesignerProject | null>(null);
   const [deletePermanentTarget, setDeletePermanentTarget] = useState<DesignerProject | null>(null);
+  const [shareTarget, setShareTarget] = useState<DesignerProject | null>(null);
 
 
   useEffect(() => {
@@ -252,7 +266,7 @@ export default function ProjectsPage() {
             <p className="text-sm text-muted-foreground max-w-md">
               {filterType === "favorites"
                 ? "No favorite projects yet. Click any project card's triple-dot menu and select 'Add to Favorites' to start starring your work!"
-                : `No projects in the "${activeLibrary}" library yet. Use the card action menus on your main dashboard to catalog projects here.`}
+                : `No projects in the "${activeLibrary}" library yet. Open a project card's ⋯ menu and choose Library to add it here.`}
             </p>
           </div>
         ) : null}
@@ -268,11 +282,12 @@ export default function ProjectsPage() {
                 dateText={p.dateText}
                 isFavorite={favorites.includes(p.id)}
                 onToggleFavorite={() => toggleFavorite(p.id)}
-                libraries={libsList}
-                onAddToLibrary={(libName) => addToLibrary(p.id, libName)}
-                onRemoveFromLibrary={() => removeFromLibrary(p.id)}
                 currentLibrary={getProjectLibraryName(p.id)}
+                onLibrary={
+                  showBin || libsList.length === 0 ? undefined : () => setLibraryTarget(p)
+                }
                 onRename={showBin ? undefined : () => setRenameTarget(p)}
+                onShare={showBin ? undefined : () => setShareTarget(p)}
                 onDelete={showBin ? undefined : () => setDeleteTarget(p)}
                 onRestore={showBin ? () => {
                   updateProject(p.id, { restore: true });
@@ -319,14 +334,14 @@ export default function ProjectsPage() {
                   {createOptions.map((opt) => {
                     const meta =
                       opt === "landing page"
-                        ? { icon: Layout, desc: "Single-page responsive marketing layout" }
+                        ? { icon: Layout, desc: "One page to sell or explain your product" }
                         : opt === "multi-page website"
-                          ? { icon: LayoutGrid, desc: "Complex multi-screen complete web layouts" }
+                          ? { icon: LayoutGrid, desc: "Several linked pages, like a full website" }
                           : opt === "product design"
-                            ? { icon: Target, desc: "Dashboards, apps, and packaging solutions" }
+                            ? { icon: Target, desc: "App screens, dashboards, or packaging" }
                             : opt === "logo design"
-                              ? { icon: PenTool, desc: "Vector marks, branding, or custom wordmarks" }
-                              : { icon: Megaphone, desc: "Banners, graphics, and social posts" };
+                              ? { icon: PenTool, desc: "Logos and brand marks" }
+                              : { icon: Megaphone, desc: "Posts, ads, and social graphics" };
                     const Icon = meta.icon;
                     return (
                       <button
@@ -400,9 +415,9 @@ export default function ProjectsPage() {
               <div className="px-6 pb-6">
                 <div className="grid gap-3 sm:grid-cols-3">
                   {[
-                    { id: "desktop", label: "Desktop App", icon: Monitor, desc: "Dashboards, web portals, SaaS layouts" },
-                    { id: "app", label: "Mobile App", icon: Smartphone, desc: "Native iOS / Android viewports" },
-                    { id: "packaging", label: "Packaging Layout", icon: Package, desc: "Containers, physical prints, wrappers" },
+                    { id: "desktop", label: "Desktop App", icon: Monitor, desc: "Web apps and dashboards on desktop" },
+                    { id: "app", label: "Mobile App", icon: Smartphone, desc: "Phone and tablet app screens" },
+                    { id: "packaging", label: "Packaging Layout", icon: Package, desc: "Boxes, labels, and print layouts" },
                   ].map((sub) => {
                     const SubIcon = sub.icon;
                     return (
@@ -539,6 +554,70 @@ export default function ProjectsPage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={libraryTarget !== null} onOpenChange={(o) => !o && setLibraryTarget(null)}>
+        <DialogContent className="border-foreground/15 bg-background/90 backdrop-blur-xl sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add to library</DialogTitle>
+            <DialogDescription>
+              {libraryTarget
+                ? `Choose a library for “${libraryTarget.name}”.`
+                : "Choose a library for this project."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 max-h-[min(50vh,320px)] overflow-y-auto pr-1">
+            {libsList.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-4 text-center">
+                No libraries yet. Use the + button next to Library in the sidebar to create one.
+              </p>
+            ) : (
+              libsList.map((lib) => {
+                const isCurrent = libraryTarget
+                  ? getProjectLibraryName(libraryTarget.id) === lib
+                  : false;
+                return (
+                  <button
+                    key={lib}
+                    type="button"
+                    className={cn(
+                      "flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left text-sm transition-colors",
+                      isCurrent
+                        ? "border-[#eca8d6]/40 bg-[#eca8d6]/10"
+                        : "border-foreground/10 bg-foreground/[0.02] hover:bg-foreground/[0.06] hover:border-foreground/15",
+                    )}
+                    onClick={() => {
+                      if (!libraryTarget) return;
+                      addToLibrary(libraryTarget.id, lib);
+                      setLibraryTarget(null);
+                    }}
+                  >
+                    <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-[#eca8d6]/15">
+                      <Library className="size-4 text-[#eca8d6]" />
+                    </span>
+                    <span className="flex-1 font-medium truncate">{lib}</span>
+                    {isCurrent ? (
+                      <span className="text-[0.65rem] font-mono uppercase text-[#eca8d6]">Current</span>
+                    ) : null}
+                  </button>
+                );
+              })
+            )}
+          </div>
+          {libraryTarget && getProjectLibraryName(libraryTarget.id) ? (
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full rounded-full border-destructive/20 text-destructive hover:bg-destructive/10"
+              onClick={() => {
+                removeFromLibrary(libraryTarget.id);
+                setLibraryTarget(null);
+              }}
+            >
+              Remove from library
+            </Button>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={renameTarget !== null} onOpenChange={(o) => !o && setRenameTarget(null)}>
         <DialogContent className="border-foreground/15 bg-background/90 backdrop-blur-xl">
           <DialogHeader>
@@ -628,6 +707,15 @@ export default function ProjectsPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {shareTarget ? (
+        <ShareDialog
+          open={shareTarget !== null}
+          onOpenChange={(o) => !o && setShareTarget(null)}
+          projectId={shareTarget.id}
+          projectName={shareTarget.name}
+        />
+      ) : null}
     </div>
   );
 }

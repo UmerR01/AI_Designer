@@ -19,25 +19,20 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 
-load_dotenv(override=True)
-
-# Programmatically detect local credentials.json to prevent any Windows path escaping issues
-local_creds = Path(__file__).parent / "credentials.json"
-if local_creds.exists():
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(local_creds.resolve())
+load_dotenv()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CONFIGURATION & CLIENT
 # ──────────────────────────────────────────────────────────────────────────────
 PROJECT_ID = os.getenv("VERTEX_PROJECT_ID", "joblynk-489820")
-LOCATION   = os.getenv("VERTEX_LOCATION", "us-central1")
+LOCATION   = os.getenv("VERTEX_LOCATION", "global")
 OUTPUT_DIR = Path("pipeline_outputs")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
 
 IMAGE_MODEL = "gemini-3.1-flash-image-preview"
-TEXT_MODEL  = "gemini-2.5-flash-lite"
+TEXT_MODEL  = "gemini-2.5-flash"
 
 # Simple in-process pacing to reduce burst calls that trigger 429 limits.
 _GEN_LOCK = threading.Lock()
@@ -284,9 +279,17 @@ def classify_intent(user_input: str, forced_platform: Optional[str] = None) -> d
 
     Return ONLY a valid JSON object (no markdown, no explanation):
     {{
-      "intent":   "ui" | "logo" | "illustration" | "social_media",
+            "intent":   "ui" | "landing_page" | "logo" | "illustration" | "social_media",
       "platform": "mobile" | "web" | "tablet" | "instagram" | "twitter" | "none",
       "screens":  [4-5 screen names when intent is "ui", else []],
+            "screen_graph": {{
+                "nodes": [
+                    {{"id": "dashboard", "screen": "Dashboard", "order": 1}}
+                ],
+                "relations": [
+                    {{"from": "dashboard", "to": "activity", "type": "next", "label": "leads to"}}
+                ]
+            }},
       "navigation": {{
         "type":  "bottom_tab_bar" (mobile/tablet) | "top_navbar" (web),
         "items": [
@@ -302,6 +305,9 @@ def classify_intent(user_input: str, forced_platform: Optional[str] = None) -> d
     - mobile/tablet: always bottom_tab_bar
     - web: always top_navbar
     - Screen names in "screens" must exactly match navigation item "screen" values
+    - screen_graph.nodes and screen_graph.relations must reuse the same screen names from "screens"
+    - Prefer sequential relations that mirror the actual UX flow, e.g. dashboard -> activity -> detail
+    - If the request is for a landing page, long homepage, or a long single-page website, set intent to "landing_page" and platform to "web"
     """
     resp = _generate_content_with_retry(
         model=TEXT_MODEL,
@@ -309,7 +315,20 @@ def classify_intent(user_input: str, forced_platform: Optional[str] = None) -> d
         max_retries=4,
         label="intent classification",
     )
-    return _safe_json_parse(resp.text)
+    parsed = _safe_json_parse(resp.text)
+    platform = parsed.get("platform", forced_platform or "mobile")
+    if parsed.get("intent") == "landing_page":
+        platform = "web"
+        parsed["screens"] = []
+        parsed["screen_graph"] = {"nodes": [], "relations": []}
+        parsed["platform"] = platform
+        return parsed
+
+    screens = normalize_ui_screens(user_input, platform, parsed.get("screens", []))
+    parsed["screens"] = screens
+    parsed["screen_graph"] = parsed.get("screen_graph") or _build_screen_graph(screens, parsed.get("navigation", {}), platform)
+    parsed["platform"] = platform
+    return parsed
 
 
 def classify_ui_chat_intent(user_input: str, forced_platform: Optional[str] = None) -> dict:
@@ -404,6 +423,38 @@ def normalize_ui_screens(query: str, platform: str, screens: list[str]) -> list[
     cleaned = cleaned[:5]
 
     return cleaned
+
+
+def _build_screen_graph(screens: list[str], navigation: dict, platform: str) -> dict:
+    normalized_screens = normalize_ui_screens("", platform, screens)
+    nodes: list[dict] = []
+    relations: list[dict] = []
+
+    for index, screen in enumerate(normalized_screens, start=1):
+        node_id = f"{_safe_slug(screen)}_{index}"
+        nav_label = ""
+        for item in navigation.get("items", []):
+            if item.get("screen", "").lower() == screen.lower():
+                nav_label = item.get("label", "")
+                break
+        nodes.append({
+            "id": node_id,
+            "screen": screen,
+            "label": screen,
+            "nav_label": nav_label,
+            "order": index,
+        })
+
+    for index in range(1, len(nodes)):
+        relation_type = "entry" if index == 1 else "next"
+        relations.append({
+            "from": nodes[index - 1]["id"],
+            "to": nodes[index]["id"],
+            "type": relation_type,
+            "label": "next screen" if index == 1 else "continues to",
+        })
+
+    return {"nodes": nodes, "relations": relations}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -852,6 +903,38 @@ Generate EXACTLY ONE complete realistic application screen.
 """
 
 
+def build_landing_page_prompt(query: str) -> str:
+    return f"""
+Create a high-fidelity landing page prototype canvas for:
+{query}
+
+STRICT PROTOTYPE FORMAT:
+- Create two equal-width vertical artboards side by side.
+- Both artboards must have exactly the same width and height.
+- Left artboard shows the top half of the landing page.
+- Right artboard shows the bottom half of the landing page.
+- Keep a clean 20px gap between both artboards.
+- Do not overlap content.
+- Do not create a browser frame or device mockup.
+- Render the composition straight-on as a clean prototyping board.
+
+LAYOUT RULES:
+- The left artboard should contain the above-the-fold landing page content: navbar, hero section, primary CTA, and trust signals.
+- The right artboard should contain the remaining landing page content: feature blocks, testimonials, pricing, FAQ, footer, and any other lower sections.
+- If the page is long, split the content naturally between the two artboards while keeping the layout continuous.
+- Both artboards must feel like one connected landing page split into top and bottom halves.
+
+VISUAL DIRECTION:
+- Make it look like a real product prototype in a design tool.
+- Use modern spacing, strong typography, subtle gradients, and realistic section hierarchy.
+- Keep all content aligned and readable.
+- Avoid overlap, cropping, or duplicated sections.
+- Do not add a browser chrome, perspective mockup, or device frame.
+
+The result should be a clean prototype board that makes it easy to review the landing page flow at a glance.
+"""
+
+
 def get_active_nav_label(screen_name: str, navigation: dict) -> str:
     for item in navigation.get("items", []):
         if item.get("screen", "").lower() == screen_name.lower():
@@ -871,6 +954,15 @@ def generate_style_guide(
     return generate_image(prompt, reference_image=reference_bytes, filename=filename)
 
 
+def generate_landing_page_prototype(
+    query: str,
+    reference_bytes: Optional[bytes] = None,
+    filename: str = "landing_page_prototype.png",
+) -> tuple[Path, bytes]:
+    prompt = build_landing_page_prompt(query)
+    return generate_image(prompt, reference_image=reference_bytes, filename=filename)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # ANCHOR RESOLUTION
 # Priority: user_upload > previous_image_b64 payload > session last image
@@ -886,6 +978,61 @@ def resolve_anchor(
     if chosen:
         return base64.b64decode(chosen)
     return _session_last_image(session_id, panel)
+
+
+async def _process_landing_page_message(
+    websocket: WebSocket,
+    raw: dict,
+    *,
+    session_panel: str,
+) -> None:
+    session_id = _normalize_session_id(raw.get("session_id") or raw.get("sessionId"))
+    _CURRENT_OUTPUT_DIR.set(_session_output_dir(session_id))
+
+    query = raw.get("query", "").strip()
+    ref_b64 = raw.get("reference_image_b64")
+    prev_b64 = raw.get("previous_image_b64")
+    reference_bytes = resolve_anchor(ref_b64, prev_b64, session_id, session_panel)
+    ctx = _session_context(session_id, session_panel)
+
+    if not query and not reference_bytes:
+        await ws_send(websocket, "error", {
+            "message": "Please provide a landing page brief or a reference image."
+        })
+        return
+
+    _remember_turn(session_id, session_panel, "user", query=query, intent="landing_page")
+
+    await ws_send(websocket, "status", {
+        "message": "Generating split-artboard landing page prototype…"
+    })
+
+    prompt = build_landing_page_prompt(query or "Landing page prototype")
+    if ctx:
+        prompt = f"[Session history]\n{ctx}\n\n{prompt}"
+
+    filename = "landing_page_prototype.png"
+    try:
+        _, raw_bytes = await asyncio.to_thread(
+            generate_landing_page_prototype,
+            query or "Landing page prototype",
+            reference_bytes,
+            filename,
+        )
+    except Exception as exc:
+        await ws_send(websocket, "error", {"message": str(exc)})
+        return
+
+    _remember_turn(session_id, session_panel, "assistant",
+                   summary="Generated landing page prototype", prompt=prompt,
+                   raw_bytes=raw_bytes, filename=filename, intent="landing_page")
+
+    await ws_send(websocket, "landing_page", {
+        "image_b64": _bytes_to_base64(raw_bytes),
+        "filename": filename,
+        "platform": "web",
+        "layout": "split_artboards",
+    })
 
 
 @app.websocket("/ws/ui")
@@ -907,6 +1054,20 @@ async def ws_ui(websocket: WebSocket):
         pass
     finally:
         _CURRENT_OUTPUT_DIR.reset(output_token)
+
+
+@app.websocket("/ws/landing_page")
+async def ws_landing_page(websocket: WebSocket):
+    """Dedicated websocket for split-artboard landing page prototyping."""
+    await websocket.accept()
+    try:
+        raw = await websocket.receive_json()
+        await _process_landing_page_message(websocket, raw, session_panel="landing_page")
+        await ws_send(websocket, "done", {})
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        await ws_send(websocket, "error", {"message": str(exc)})
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -948,6 +1109,7 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
             flow_platform = ui_flow.get("platform", "mobile")
             flow_screens  = ui_flow.get("screens", [])
             flow_nav      = ui_flow.get("navigation", {})
+            flow_graph    = ui_flow.get("screen_graph") or _build_screen_graph(flow_screens, flow_nav, flow_platform)
             anchor_bytes  = base64.b64decode(ui_flow.get("anchor_bytes_b64", "")) if ui_flow.get("anchor_bytes_b64") else None
             anchor_screen = ui_flow.get("anchor_screen", flow_screens[0] if flow_screens else "Dashboard")
 
@@ -976,6 +1138,7 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
 
                 ui_flow["anchor_bytes_b64"] = _bytes_to_base64(new_anchor)
                 ui_flow["approved"] = False
+                ui_flow["screen_graph"] = flow_graph
                 state["ui_flow"]["ui"] = ui_flow
 
                 await ws_send(websocket, "anchor_preview", {
@@ -983,6 +1146,8 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
                     "filename": filename,
                     "screen": anchor_screen,
                     "platform": flow_platform,
+                    "node_id": next((node.get("id", "") for node in flow_graph.get("nodes", []) if node.get("screen", "").lower() == anchor_screen.lower()), ""),
+                    "screen_graph": flow_graph,
                 })
                 await ws_send(websocket, "assistant_message", {
                     "message": "I regenerated the anchor. Approve it to continue, or ask for more changes."
@@ -998,6 +1163,7 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
                     return
 
                 ui_flow["approved"] = True
+                ui_flow["screen_graph"] = flow_graph
                 state["ui_flow"]["ui"] = ui_flow
 
                 remaining = flow_screens[1:] if len(flow_screens) > 1 else []
@@ -1027,6 +1193,12 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
                         await asyncio.sleep(2)
                         continue
 
+                    node_id = ""
+                    for node in flow_graph.get("nodes", []):
+                        if node.get("screen", "").lower() == screen.lower():
+                            node_id = node.get("id", "")
+                            break
+
                     _remember_turn(session_id, "ui", "assistant",
                                    summary=f"Generated {screen}", prompt=prompt,
                                    raw_bytes=raw_bytes, filename=filename, intent="ui", platform=flow_platform)
@@ -1037,6 +1209,8 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
                         "platform":  flow_platform,
                         "image_b64": _bytes_to_base64(raw_bytes),
                         "filename":  filename,
+                        "node_id":   node_id,
+                        "screen_graph": flow_graph,
                     })
                     if i < len(flow_screens) - 1:
                         await asyncio.sleep(8)
@@ -1138,6 +1312,8 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
                     "platform":  flow_platform,
                     "image_b64": _bytes_to_base64(raw_bytes),
                     "filename":  filename,
+                    "node_id":   next((node.get("id", "") for node in flow_graph.get("nodes", []) if node.get("screen", "").lower() == specific.lower()), ""),
+                    "screen_graph": flow_graph,
                 })
                 await ws_send(websocket, "done", {})
                 return
@@ -1153,9 +1329,6 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
             if chat_meta.get("platform") in {"mobile", "web", "tablet"}
             else meta.get("platform", "mobile")
         )
-        screens = screens_override or chat_meta.get("screens") or meta.get("screens", [])
-        screens = normalize_ui_screens(query, platform, screens)
-
         navigation = meta.get("navigation") or {
             "type":  _spec(platform)["nav_type"],
             "items": [
@@ -1165,6 +1338,9 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
                 {"label": "Settings",  "icon": "settings", "screen": "Settings"},
             ],
         }
+        screens = screens_override or chat_meta.get("screens") or meta.get("screens", [])
+        screens = normalize_ui_screens(query, platform, screens)
+        screen_graph = chat_meta.get("screen_graph") or meta.get("screen_graph") or _build_screen_graph(screens, navigation, platform)
 
         _remember_turn(session_id, "ui", "user", query=query, intent="ui", platform=platform)
 
@@ -1207,6 +1383,7 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
             "platform": platform,
             "screens": screens,
             "navigation": navigation,
+            "screen_graph": screen_graph,
             "style_bytes_b64": _bytes_to_base64(style_bytes),
             "anchor_bytes_b64": _bytes_to_base64(anchor_bytes),
             "anchor_screen": anchor_screen,
@@ -1223,6 +1400,8 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
             "screen":    anchor_screen,
             "platform":  platform,
             "remaining_screens": screens[1:],
+            "node_id": next((node.get("id", "") for node in screen_graph.get("nodes", []) if node.get("screen", "").lower() == anchor_screen.lower()), ""),
+            "screen_graph": screen_graph,
         })
         await ws_send(websocket, "assistant_message", {
             "message": "This anchor design is selected as style reference. Approve to generate remaining screens, or request changes."
@@ -1457,7 +1636,7 @@ async def ws_practice(websocket: WebSocket):
         await ws_send(websocket, "status", {"message": "Classifying intent…"})
         meta     = await asyncio.to_thread(classify_intent, query)
         intent   = meta.get("intent", "illustration")
-        platform = meta.get("platform", "mobile" if intent == "ui" else "none")
+        platform = meta.get("platform", "mobile" if intent == "ui" else "web" if intent == "landing_page" else "none")
         screens  = meta.get("screens", [])
         is_edit  = meta.get("is_edit", False) and user_ref_bytes is not None
 
@@ -1468,6 +1647,11 @@ async def ws_practice(websocket: WebSocket):
             "intent": intent, "platform": platform,
             "screens": screens, "is_edit": is_edit,
         })
+
+        if intent == "landing_page":
+            await _process_landing_page_message(websocket, raw, session_panel="landing_page")
+            await ws_send(websocket, "done", {})
+            return
 
         # ── UI ───────────────────────────────────────────────────────────────
         if intent == "ui":
