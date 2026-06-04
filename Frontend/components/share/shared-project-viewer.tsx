@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   collectShareGalleryImages,
+  shareGalleryIdentityKey,
   shareImageLabel,
   type ShareGalleryImage,
 } from "@/lib/share-gallery";
@@ -156,7 +157,7 @@ export function SharedProjectViewer({
               const label = shareImageLabel(img);
               return (
                 <article
-                  key={img.id || img.url}
+                  key={`${shareGalleryIdentityKey(img)}-${index}`}
                   className="rounded-2xl border border-foreground/10 bg-background overflow-hidden shadow-sm"
                 >
                   {/* eslint-disable-next-line @next/next/no-img-element */}

@@ -19,11 +19,14 @@ export function ShareDialog({
   onOpenChange,
   projectId,
   projectName,
+  canManage = true,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   projectId: string;
   projectName: string;
+  /** When false (shared editor), only copy existing links — no invites or link creation. */
+  canManage?: boolean;
 }) {
   const [loading, setLoading] = useState(false);
   const [state, setState] = useState<SharingState | null>(null);
@@ -129,16 +132,25 @@ export function ShareDialog({
           <DialogHeader className="space-y-2">
             <DialogTitle className="font-display text-2xl tracking-tight">Share design</DialogTitle>
             <DialogDescription className="text-sm">
-              Control access to <span className="text-foreground/90 font-medium">{projectName}</span>.
-              <span className="block mt-1 text-muted-foreground">
-                <strong className="text-foreground/80 font-medium">Can view</strong> — gallery with downloads only.
-                <strong className="text-foreground/80 font-medium"> Can edit</strong> — opens this project in the editor.
-              </span>
+              {canManage ? (
+                <>
+                  Control access to <span className="text-foreground/90 font-medium">{projectName}</span>.
+                  <span className="block mt-1 text-muted-foreground">
+                    <strong className="text-foreground/80 font-medium">Can view</strong> — gallery with downloads only.
+                    <strong className="text-foreground/80 font-medium"> Can edit</strong> — opens this project in the editor.
+                  </span>
+                </>
+              ) : (
+                <>
+                  Copy an existing share link for{" "}
+                  <span className="text-foreground/90 font-medium">{projectName}</span>. Only the project owner can invite people or create new links.
+                </>
+              )}
             </DialogDescription>
           </DialogHeader>
 
           <div className="mt-4 space-y-3">
-            {/* Invite */}
+            {canManage ? (
             <div className="rounded-2xl border border-foreground/10 bg-foreground/[0.02] p-3.5">
               <div className="flex items-center justify-between gap-4">
                 <div className="flex items-center gap-2">
@@ -187,45 +199,84 @@ export function ShareDialog({
                 </Button>
               </div>
             </div>
+            ) : null}
 
-            {/* Share links */}
             <div className="rounded-2xl border border-foreground/10 bg-foreground/[0.02] p-3.5">
               <div className="flex items-center justify-between gap-4">
                 <div className="flex items-center gap-2">
                   <Link2 className="size-4 text-[#eca8d6]" />
                   <div className="text-sm font-medium">Share link</div>
                 </div>
-                <AccessLevelSelect value={linkRole} onChange={setLinkRole} compact />
+                {canManage ? (
+                  <AccessLevelSelect value={linkRole} onChange={setLinkRole} compact />
+                ) : null}
               </div>
 
               <div className="mt-3 space-y-2">
-                <Button
-                  variant="outline"
-                  className="w-full h-10 rounded-2xl border-foreground/15 bg-background/50 justify-between"
-                  onClick={() => void ensureLinkAndCopy("public")}
-                >
-                  <span className="inline-flex items-center gap-2">
-                    <Globe className="size-4 text-muted-foreground" />
-                    Copy public link
-                  </span>
-                  <Copy className="size-4 text-muted-foreground" />
-                </Button>
+                {canManage ? (
+                  <>
+                    <Button
+                      variant="outline"
+                      className="w-full h-10 rounded-2xl border-foreground/15 bg-background/50 justify-between"
+                      onClick={() => void ensureLinkAndCopy("public")}
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <Globe className="size-4 text-muted-foreground" />
+                        Copy public link
+                      </span>
+                      <Copy className="size-4 text-muted-foreground" />
+                    </Button>
 
-                <div className="flex gap-2">
-                  <Input
-                    value={privatePassword}
-                    onChange={(e) => setPrivatePassword(e.target.value)}
-                    placeholder="Private password"
-                    type="password"
-                    className="h-10 rounded-2xl border-foreground/15 bg-background/50 flex-1 min-w-0"
-                  />
-                  <Button
-                    className="h-10 rounded-2xl bg-foreground text-background hover:bg-foreground/90 px-4 shrink-0"
-                    onClick={() => void ensureLinkAndCopy("password", privatePassword)}
-                  >
-                    Copy private
-                  </Button>
-                </div>
+                    <div className="flex gap-2">
+                      <Input
+                        value={privatePassword}
+                        onChange={(e) => setPrivatePassword(e.target.value)}
+                        placeholder="Private password"
+                        type="password"
+                        className="h-10 rounded-2xl border-foreground/15 bg-background/50 flex-1 min-w-0"
+                      />
+                      <Button
+                        className="h-10 rounded-2xl bg-foreground text-background hover:bg-foreground/90 px-4 shrink-0"
+                        onClick={() => void ensureLinkAndCopy("password", privatePassword)}
+                      >
+                        Copy private
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <Button
+                      variant="outline"
+                      className="w-full h-10 rounded-2xl border-foreground/15 bg-background/50 justify-between"
+                      disabled={!publicLink}
+                      onClick={() => {
+                        if (!publicLink?.slug) return toast.error("No public link yet. Ask the owner to create one.");
+                        void copy(makeShareUrl(publicLink.slug), "Public link copied.");
+                      }}
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <Globe className="size-4 text-muted-foreground" />
+                        Copy public link
+                      </span>
+                      <Copy className="size-4 text-muted-foreground" />
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="w-full h-10 rounded-2xl border-foreground/15 bg-background/50 justify-between"
+                      disabled={!privateLink}
+                      onClick={() => {
+                        if (!privateLink?.slug) return toast.error("No private link yet. Ask the owner to create one.");
+                        void copy(makeShareUrl(privateLink.slug), "Private link copied.");
+                      }}
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <Lock className="size-4 text-muted-foreground" />
+                        Copy private link
+                      </span>
+                      <Copy className="size-4 text-muted-foreground" />
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
           </div>
