@@ -96,7 +96,9 @@ import {
   type UiFlowGraph,
 } from "@/lib/ui-flow-graph";
 import {
+  ensureEditorTreeForHydration,
   repairPrototypeTreeForLoad,
+  shareClaimStorageKey,
   syncPrototypeSectionsToTree,
   usesPrototypeSectionCanvas,
 } from "@/lib/prototype-tree-sync";
@@ -171,12 +173,8 @@ function initials(first: string | undefined, last: string | undefined, email: st
 }
 
 function normalizePersistedEditorData(raw: unknown): PersistedEditorData | null {
-  const coerced = coercePersistedProjectData(raw);
-  if (!coerced.tree.length) {
-    if (!raw || typeof raw !== "object") return null;
-    if (!Array.isArray((raw as PersistedEditorData).tree)) return null;
-  }
-  return coerced;
+  if (!raw || typeof raw !== "object") return null;
+  return coercePersistedProjectData(raw);
 }
 
 function classifyGeneratedImage(img: GeneratedUiImage): "logo" | "mobile" | "poster" | "web" | "generic" {
@@ -429,18 +427,57 @@ export default function ProjectEditorPage() {
             return;
           }
         }
+
         const found = res.project
           ? ({
-            id: res.project.id,
-            name: res.project.name,
-            kind: res.project.kind as ProjectKind,
-            sizeText: "0 GB",
-            dateText: "",
-          } satisfies DesignerProject)
+              id: res.project.id,
+              name: res.project.name,
+              kind: res.project.kind as ProjectKind,
+              sizeText: "0 GB",
+              dateText: "",
+            } satisfies DesignerProject)
           : null;
         if (!cancelled) {
           resolvedMeta = found ?? localMeta;
-          setProjectMeta(found ?? localMeta);
+          setProjectMeta(resolvedMeta);
+        }
+
+        if (
+          sharedFromLink &&
+          res.role !== "owner" &&
+          res.role !== "editor" &&
+          res.role !== "viewer"
+        ) {
+          const claimSlug = sessionStorage.getItem(shareClaimStorageKey(projectId));
+          if (claimSlug) {
+            try {
+              await postJson(`/api/share/${claimSlug}/claim`, {});
+              const again = await getJson<{
+                project: { id: string; name: string; kind: string };
+                role: ProjectRole;
+              }>(`/api/projects/${projectId}`);
+              loadedRole = again.role ?? null;
+              if (!cancelled) {
+                setProjectRole(loadedRole);
+                if (again.role === "viewer") {
+                  window.location.replace(`/view/${projectId}`);
+                  return;
+                }
+                if (again.project) {
+                  resolvedMeta = {
+                    id: again.project.id,
+                    name: again.project.name,
+                    kind: again.project.kind as ProjectKind,
+                    sizeText: "0 GB",
+                    dateText: "",
+                  };
+                  setProjectMeta(resolvedMeta);
+                }
+              }
+            } catch {
+              // fall through — hydration may still work for members
+            }
+          }
         }
       } catch (e) {
         if (!cancelled) {
@@ -450,9 +487,42 @@ export default function ProjectEditorPage() {
             return;
           }
           if (e instanceof ApiError && (e.status === 403 || e.status === 404)) {
-            toast.error("Sign in or use the share link you were given to access this project.");
-            window.location.replace(loginUrlWithNext(`/project/${projectId}?shared=1`));
-            return;
+            const claimSlug = sharedFromLink
+              ? sessionStorage.getItem(shareClaimStorageKey(projectId))
+              : null;
+            if (claimSlug) {
+              try {
+                await postJson(`/api/share/${claimSlug}/claim`, {});
+                const again = await getJson<{
+                  project: { id: string; name: string; kind: string };
+                  role: ProjectRole;
+                }>(`/api/projects/${projectId}`);
+                loadedRole = again.role ?? null;
+                setProjectRole(loadedRole);
+                if (again.role === "viewer") {
+                  window.location.replace(`/view/${projectId}`);
+                  return;
+                }
+                if (again.project) {
+                  resolvedMeta = {
+                    id: again.project.id,
+                    name: again.project.name,
+                    kind: again.project.kind as ProjectKind,
+                    sizeText: "0 GB",
+                    dateText: "",
+                  };
+                  setProjectMeta(resolvedMeta);
+                }
+              } catch {
+                toast.error("Sign in or use the share link you were given to access this project.");
+                window.location.replace(loginUrlWithNext(`/project/${projectId}?shared=1`));
+                return;
+              }
+            } else {
+              toast.error("Sign in or use the share link you were given to access this project.");
+              window.location.replace(loginUrlWithNext(`/project/${projectId}?shared=1`));
+              return;
+            }
           }
           resolvedMeta = localMeta;
           setProjectMeta(localMeta);
@@ -571,20 +641,21 @@ export default function ProjectEditorPage() {
           openFolders = {};
         }
 
-        const imagesForEditor =
-          kind === "landing page"
-            ? repairLandingPrototypeImageTags(imagesWithMeta, tree)
-            : imagesWithMeta;
+        let imagesForEditor = imagesWithMeta;
 
-        if (supportsPrototypeFlow(kind) && imagesForEditor.length > 0) {
-          const repaired = repairPrototypeTreeForLoad(
+        if (imagesForEditor.length > 0) {
+          const ensured = ensureEditorTreeForHydration(
             tree,
             activeId,
             imagesForEditor,
             kind,
           );
-          tree = repaired.tree;
-          activeId = repaired.activeId;
+          tree = ensured.tree;
+          activeId = ensured.activeId;
+        }
+
+        if (kind === "landing page") {
+          imagesForEditor = repairLandingPrototypeImageTags(imagesForEditor, tree);
         }
 
         setTree(tree);
@@ -599,19 +670,19 @@ export default function ProjectEditorPage() {
         const boot = getEditorBootstrap(kind);
         let bootTree = boot.tree;
         let bootActiveId = boot.activeId;
-        const bootImages =
-          kind === "landing page"
-            ? repairLandingPrototypeImageTags(imagesWithMeta, bootTree)
-            : imagesWithMeta;
-        if (supportsPrototypeFlow(kind) && bootImages.length > 0) {
-          const repaired = repairPrototypeTreeForLoad(
+        let bootImages = imagesWithMeta;
+        if (bootImages.length > 0) {
+          const ensured = ensureEditorTreeForHydration(
             bootTree,
             bootActiveId,
             bootImages,
             kind,
           );
-          bootTree = repaired.tree;
-          bootActiveId = repaired.activeId;
+          bootTree = ensured.tree;
+          bootActiveId = ensured.activeId;
+        }
+        if (kind === "landing page") {
+          bootImages = repairLandingPrototypeImageTags(bootImages, bootTree);
         }
         setTree(bootTree);
         setActiveId(bootActiveId);
@@ -647,7 +718,7 @@ export default function ProjectEditorPage() {
   const [pendingHref, setPendingHref] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [projectRole, setProjectRole] = useState<ProjectRole | null>(null);
-  const isOwner = projectRole === "owner" || projectRole === null;
+  const isOwner = projectRole === "owner";
   const isSharedEditor =
     projectRole === "editor" || (sharedFromLink && projectRole !== "owner");
   const [me, setMe] = useState<MeResponse["user"]>(null);
