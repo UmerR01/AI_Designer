@@ -1287,6 +1287,14 @@ export default function ProjectEditorPage() {
     }
     prevScreenCountRef.current = count;
   }, [tree]);
+
+  // New social media projects: show preset grid (not the custom size dialog).
+  useEffect(() => {
+    if (!hydrated || projectKind !== "social media design") return;
+    if (countScreensInTree(tree) === 0) {
+      setPresetPickerOpen(true);
+    }
+  }, [hydrated, projectKind, tree]);
   const latestGeneratedUiImage = useMemo(() => {
     if (!generatedUiImages.length) return null;
     return generatedUiImages
@@ -1370,21 +1378,10 @@ export default function ProjectEditorPage() {
     const folder = findNodeById(tree, folderId);
     if (!folder || folder.kind !== "folder") return;
 
-    const needsPrompt =
-      projectKind === "product design - packaging" ||
-      projectKind === "social media design";
-
-    if (needsPrompt) {
-      let defaultW = "1080";
-      let defaultH = "1080";
-      let defaultUnit: "px" | "inch" | "cm" | "m" = "px";
-      if (projectKind === "product design - packaging") {
-        defaultW = "1200";
-        defaultH = "1200";
-      }
-      setCustomWidth(defaultW);
-      setCustomHeight(defaultH);
-      setCustomUnit(defaultUnit);
+    if (projectKind === "product design - packaging") {
+      setCustomWidth("1200");
+      setCustomHeight("1200");
+      setCustomUnit("px");
       setPendingFolderId(folderId);
       setSizeModalOpen(true);
       return;
@@ -1431,22 +1428,10 @@ export default function ProjectEditorPage() {
   function handleHeaderPlus(isFromChat: boolean | any = false): string {
     const isChat = isFromChat === true;
 
-    const needsPrompt =
-      !isChat &&
-      (projectKind === "product design - packaging" ||
-        projectKind === "social media design");
-
-    if (needsPrompt) {
-      let defaultW = "1080";
-      let defaultH = "1080";
-      let defaultUnit: "px" | "inch" | "cm" | "m" = "px";
-      if (projectKind === "product design - packaging") {
-        defaultW = "1200";
-        defaultH = "1200";
-      }
-      setCustomWidth(defaultW);
-      setCustomHeight(defaultH);
-      setCustomUnit(defaultUnit);
+    if (!isChat && projectKind === "product design - packaging") {
+      setCustomWidth("1200");
+      setCustomHeight("1200");
+      setCustomUnit("px");
       setPendingFolderId(null);
       setSizeModalOpen(true);
       return "";
