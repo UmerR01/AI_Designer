@@ -15,7 +15,9 @@ export async function GET(_: Request, ctx: { params: Promise<{ id: string }> }) 
 
   const { id } = await ctx.params;
   const role = await getUserRoleForProject(user.id, id);
-  if (role !== "owner") return NextResponse.json({ detail: "Forbidden." }, { status: 403 });
+  if (role !== "owner" && role !== "editor") {
+    return NextResponse.json({ detail: "Forbidden." }, { status: 403 });
+  }
 
   const members = await sql()<{
     user_id: string;

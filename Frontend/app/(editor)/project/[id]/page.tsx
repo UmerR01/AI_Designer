@@ -41,6 +41,7 @@ import {
   getEditorBootstrap,
   isBlankStarterTree,
   isDefaultUiUxBootstrapTree,
+  collectScreens,
   countScreensInTree,
   treeHasScreens,
   type EditorTreeNode,
@@ -94,6 +95,11 @@ import {
   supportsPrototypeFlow,
   type UiFlowGraph,
 } from "@/lib/ui-flow-graph";
+import {
+  repairPrototypeTreeForLoad,
+  syncPrototypeSectionsToTree,
+  usesPrototypeSectionCanvas,
+} from "@/lib/prototype-tree-sync";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
@@ -381,6 +387,7 @@ export default function ProjectEditorPage() {
   const projectKind = resolveProjectKind(projectMeta?.kind);
 
   const [tree, setTree] = useState<EditorTreeNode[]>([]);
+  const treeRef = useRef<EditorTreeNode[]>([]);
   const [activeId, setActiveId] = useState<string>("");
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
   const [hydrated, setHydrated] = useState(false);
@@ -407,14 +414,16 @@ export default function ProjectEditorPage() {
     (async () => {
       const localMeta = readDesignerProjects().find((p) => p.id === projectId) ?? null;
       let resolvedMeta: DesignerProject | null = localMeta;
+      let loadedRole: ProjectRole | null = null;
 
       try {
         const res = await getJson<{
           project: { id: string; name: string; kind: string };
           role: ProjectRole;
         }>(`/api/projects/${projectId}`);
+        loadedRole = res.role ?? null;
         if (!cancelled) {
-          setProjectRole(res.role ?? null);
+          setProjectRole(loadedRole);
           if (res.role === "viewer") {
             window.location.replace(`/view/${projectId}`);
             return;
@@ -512,8 +521,11 @@ export default function ProjectEditorPage() {
         remoteSavedAt &&
         (!localSavedAt || remoteSavedAt.localeCompare(localSavedAt) >= 0);
 
-      const parsedData =
-        remoteIsNewer && remoteParsedData
+      const isCollaborator =
+        sharedFromLink || loadedRole === "editor" || loadedRole === "viewer";
+      const parsedData = isCollaborator
+        ? remoteParsedData ?? localParsedData
+        : remoteIsNewer && remoteParsedData
           ? { ...localParsedData, ...remoteParsedData }
           : localParsedData ?? remoteParsedData;
 
@@ -564,7 +576,19 @@ export default function ProjectEditorPage() {
             ? repairLandingPrototypeImageTags(imagesWithMeta, tree)
             : imagesWithMeta;
 
+        if (supportsPrototypeFlow(kind) && imagesForEditor.length > 0) {
+          const repaired = repairPrototypeTreeForLoad(
+            tree,
+            activeId,
+            imagesForEditor,
+            kind,
+          );
+          tree = repaired.tree;
+          activeId = repaired.activeId;
+        }
+
         setTree(tree);
+        treeRef.current = tree;
         setActiveId(activeId);
         setOpenFolders(openFolders);
         setGeneratedUiImages(imagesForEditor);
@@ -572,11 +596,27 @@ export default function ProjectEditorPage() {
         lastChatImagesSigRef.current = prototypeImagesSignature(imagesForEditor);
         if (draft && draft !== saved) setIsDirty(true);
       } else {
-        applyBootstrap();
+        const boot = getEditorBootstrap(kind);
+        let bootTree = boot.tree;
+        let bootActiveId = boot.activeId;
         const bootImages =
           kind === "landing page"
-            ? repairLandingPrototypeImageTags(imagesWithMeta, getEditorBootstrap(kind).tree)
+            ? repairLandingPrototypeImageTags(imagesWithMeta, bootTree)
             : imagesWithMeta;
+        if (supportsPrototypeFlow(kind) && bootImages.length > 0) {
+          const repaired = repairPrototypeTreeForLoad(
+            bootTree,
+            bootActiveId,
+            bootImages,
+            kind,
+          );
+          bootTree = repaired.tree;
+          bootActiveId = repaired.activeId;
+        }
+        setTree(bootTree);
+        setActiveId(bootActiveId);
+        setOpenFolders(boot.openFolders);
+        treeRef.current = bootTree;
         setGeneratedUiImages(bootImages);
         setUiFlowGraph(restoredFlowGraph);
         lastChatImagesSigRef.current = prototypeImagesSignature(bootImages);
@@ -617,6 +657,10 @@ export default function ProjectEditorPage() {
   const restoredPrototypeSectionsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
+    treeRef.current = tree;
+  }, [tree]);
+
+  useEffect(() => {
     prototypeSectionMapRef.current = new Map();
     restoredPrototypeSectionsRef.current = new Set();
   }, [projectId]);
@@ -644,28 +688,38 @@ export default function ProjectEditorPage() {
       const cached = prototypeSectionMapRef.current.get(mapKey);
       if (cached) return cached;
 
-      let screenId = resolveEditorScreenId(tree, activeId);
+      const currentTree = treeRef.current;
+      let screenId = resolveEditorScreenId(currentTree, activeId);
+      if (!screenId && usesPrototypeSectionCanvas(projectKind)) {
+        const screens = collectScreens(currentTree);
+        if (screens.length >= 1) screenId = screens[0].id;
+      }
       if (!screenId) {
         const newScreenId = crypto.randomUUID();
         const newSectionId = crypto.randomUUID();
-        const frame = projectKind === "product design - app" ? "mobile" : "desktop";
+        const frame: "desktop" | "mobile" =
+          projectKind === "product design - app" ? "mobile" : "desktop";
         prototypeSectionMapRef.current.set(mapKey, newSectionId);
-        setTree((prev) => [
-          ...prev,
-          {
-            id: newScreenId,
-            kind: "screen",
-            name: "Untitled",
-            frame,
-            sections: [{ id: newSectionId, name: label }],
-            expansionDirection: "vertical",
-          },
-        ]);
+        setTree((prev) => {
+          const next: EditorTreeNode[] = [
+            ...prev,
+            {
+              id: newScreenId,
+              kind: "screen" as const,
+              name: "Untitled",
+              frame,
+              sections: [{ id: newSectionId, name: label }],
+              expansionDirection: "vertical" as const,
+            },
+          ];
+          treeRef.current = next;
+          return next;
+        });
         setActiveId(newScreenId);
         return newSectionId;
       }
 
-      const screenNode = findNodeById(tree, screenId);
+      const screenNode = findNodeById(treeRef.current, screenId);
       if (!screenNode || screenNode.kind !== "screen") return null;
 
       const sections = screenNode.sections ?? [];
@@ -690,8 +744,8 @@ export default function ProjectEditorPage() {
       if (onlyDefaultSection) {
         const sectionId = sections[0].id;
         prototypeSectionMapRef.current.set(mapKey, sectionId);
-        setTree((prev) =>
-          mapTree(prev, (n) => {
+        setTree((prev) => {
+          const next = mapTree(prev, (n) => {
             if (n.kind !== "screen" || n.id !== screenId) return n;
             return {
               ...n,
@@ -699,25 +753,29 @@ export default function ProjectEditorPage() {
                 s.id === sectionId ? { ...s, name: label } : s,
               ),
             };
-          }),
-        );
+          });
+          treeRef.current = next;
+          return next;
+        });
         return sectionId;
       }
 
       const newSectionId = crypto.randomUUID();
       prototypeSectionMapRef.current.set(mapKey, newSectionId);
-      setTree((prev) =>
-        mapTree(prev, (n) => {
+      setTree((prev) => {
+        const next = mapTree(prev, (n) => {
           if (n.kind !== "screen" || n.id !== screenId) return n;
           return {
             ...n,
             sections: [...(n.sections ?? []), { id: newSectionId, name: label }],
           };
-        }),
-      );
+        });
+        treeRef.current = next;
+        return next;
+      });
       return newSectionId;
     },
-    [activeId, tree, projectKind, generatedUiImages, resolveEditorScreenId],
+    [activeId, projectKind, generatedUiImages, resolveEditorScreenId],
   );
 
   /** Chat is source of truth while generating — replace with latest full image list. */
@@ -729,12 +787,14 @@ export default function ProjectEditorPage() {
         list = repairLandingPrototypeImageTags(list, tree);
       }
       if (supportsPrototypeFlow(projectKind)) {
-        for (const img of list) {
-          const label = inferScreenLabelFromImage(img);
-          if (!label) continue;
-          if (String(img.page_name || "").toLowerCase().includes("style guide")) continue;
-          ensurePrototypeSection({ screenName: label, nodeId: img.nodeId });
-        }
+        setTree((prev) => {
+          const { tree: next, activeId: nextActive, sectionMap } =
+            syncPrototypeSectionsToTree(prev, activeId, list, projectKind);
+          for (const [k, v] of sectionMap) prototypeSectionMapRef.current.set(k, v);
+          treeRef.current = next;
+          if (nextActive && nextActive !== activeId) setActiveId(nextActive);
+          return next;
+        });
       }
       setGeneratedUiImages((prev) => {
         const next = dedupeGeneratedImages(
@@ -752,7 +812,7 @@ export default function ProjectEditorPage() {
         dirtyRef.current = true;
       }
     },
-    [uiFlowGraph, projectKind, ensurePrototypeSection, tree],
+    [uiFlowGraph, projectKind, activeId, tree],
   );
 
   const applyFlowGraph = useCallback((incoming: UiFlowGraph | null) => {
@@ -813,22 +873,28 @@ export default function ProjectEditorPage() {
     [projectId],
   );
 
-  // Restore artboard sections for each saved prototype screen after reload.
+  // Keep one artboard + sections in sync when prototype images load (shared editors, reload).
   useEffect(() => {
     if (!hydrated || !supportsPrototypeFlow(projectKind)) return;
-    const sorted = [...generatedUiImages].sort(
-      (a, b) => (a.index ?? 999) - (b.index ?? 999),
+    if (generatedUiImages.length === 0) return;
+
+    const { tree: next, activeId: nextActive, sectionMap } = syncPrototypeSectionsToTree(
+      treeRef.current,
+      activeId,
+      generatedUiImages,
+      projectKind,
     );
-    for (const img of sorted) {
-      const label = inferScreenLabelFromImage(img);
-      if (!label) continue;
-      if (String(img.page_name || "").toLowerCase().includes("style guide")) continue;
-      const key = (img.nodeId || label).toLowerCase();
-      if (restoredPrototypeSectionsRef.current.has(key)) continue;
-      restoredPrototypeSectionsRef.current.add(key);
-      ensurePrototypeSection({ screenName: label, nodeId: img.nodeId });
+    for (const [k, v] of sectionMap) {
+      prototypeSectionMapRef.current.set(k, v);
+      restoredPrototypeSectionsRef.current.add(k);
     }
-  }, [hydrated, generatedUiImages, projectKind, ensurePrototypeSection]);
+    const treeChanged = JSON.stringify(next) !== JSON.stringify(treeRef.current);
+    if (treeChanged) {
+      treeRef.current = next;
+      setTree(next);
+    }
+    if (nextActive && nextActive !== activeId) setActiveId(nextActive);
+  }, [hydrated, generatedUiImages, projectKind, activeId]);
 
   const [isSaving, setIsSaving] = useState(false);
   const [brokenImageKeys, setBrokenImageKeys] = useState<Record<string, boolean>>({});
@@ -2250,7 +2316,7 @@ export default function ProjectEditorPage() {
                 Download <Download className="ml-2 size-3.5" />
               </Button>
             )}
-            {isOwner ? (
+            {isOwner || projectRole === "editor" ? (
               <Button
                 variant="outline"
                 size="sm"
@@ -2410,6 +2476,7 @@ export default function ProjectEditorPage() {
           onOpenChange={setShareOpen}
           projectId={projectMeta.id}
           projectName={projectMeta.name}
+          canManage={isOwner}
         />
       ) : null}
 
