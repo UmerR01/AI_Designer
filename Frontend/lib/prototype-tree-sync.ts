@@ -296,3 +296,61 @@ export function repairPrototypeTreeForLoad(
   );
   return { tree: synced, activeId: nextActive };
 }
+
+/** Shared editor / reload: ensure at least one artboard when designs exist (e.g. landing page). */
+export function ensureEditorTreeForHydration(
+  tree: EditorTreeNode[],
+  activeId: string,
+  images: PrototypeSectionSyncImage[],
+  kind?: string,
+): { tree: EditorTreeNode[]; activeId: string } {
+  const screens = collectScreens(tree);
+  if (screens.length > 0) {
+    const activeNode = activeId ? findNodeById(tree, activeId) : null;
+    const nextActive =
+      activeNode?.kind === "screen"
+        ? activeId
+        : activeNode?.kind === "folder" && activeNode.children?.length
+          ? activeNode.children.find((c) => c.kind === "screen")?.id ?? screens[0].id
+          : screens[0].id;
+    return { tree, activeId: nextActive };
+  }
+
+  if (!images.length) return { tree, activeId };
+
+  if (supportsPrototypeFlow(kind)) {
+    return repairPrototypeTreeForLoad(tree, activeId, images, kind);
+  }
+
+  const k = (kind || "").toLowerCase().trim();
+  const screenId = crypto.randomUUID();
+  const sectionId = crypto.randomUUID();
+  let screenName = "Untitled";
+  if (k === "landing page") screenName = "Landing Page";
+  else if (k === "website design" || k === "multi-page website") screenName = "Website";
+
+  const frame: "desktop" | "mobile" =
+    k === "product design - app" ? "mobile" : "desktop";
+
+  return {
+    tree: [
+      {
+        id: screenId,
+        kind: "screen",
+        name: screenName,
+        frame,
+        sections: [
+          {
+            id: sectionId,
+            name: k === "landing page" ? "Main" : "First Section",
+          },
+        ],
+        expansionDirection: "vertical",
+      },
+    ],
+    activeId: screenId,
+  };
+}
+
+export const shareClaimStorageKey = (projectId: string) =>
+  `share.claimSlug.${projectId}`;

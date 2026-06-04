@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { ApiError, getJson, postJson } from "@/lib/auth-api";
 import { loginUrlWithNext } from "@/lib/auth/login-redirect";
 import { SharedProjectViewer } from "@/components/share/shared-project-viewer";
+import { shareClaimStorageKey } from "@/lib/prototype-tree-sync";
 import type { ShareGalleryImage } from "@/lib/share-gallery";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -44,6 +45,7 @@ export default function ShareViewClient({ slug }: { slug: string }) {
         return;
       }
       await postJson(`/api/share/${slug}/claim`, {});
+      sessionStorage.setItem(shareClaimStorageKey(projectId), slug);
       router.replace(`/project/${projectId}?shared=1`);
     } catch (e: unknown) {
       if (e instanceof ApiError && e.status === 401) {
