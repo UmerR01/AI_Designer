@@ -1,1278 +1,1686 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Morphic — AI Design Studio</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:wght@300;400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
-<style>
-  :root {
-    --bg: #080a0f;
-    --surface: #0e1117;
-    --surface2: #141720;
-    --border: rgba(255,255,255,0.07);
-    --border-hover: rgba(255,255,255,0.15);
-    --text: #f0f2f7;
-    --text-muted: #6b7280;
-    --text-dim: #374151;
-    --accent: #7c6cff;
-    --accent2: #c084fc;
-    --accent3: #38bdf8;
-    --glow: rgba(124,108,255,0.25);
-    --glow2: rgba(192,132,252,0.15);
-    --success: #4ade80;
-    --warning: #fbbf24;
-    --error: #f87171;
-    --radius: 14px;
-    --radius-sm: 8px;
-    --mono: 'DM Mono', monospace;
-    --sans: 'Syne', sans-serif;
-    --serif: 'Instrument Serif', serif;
-  }
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Morphic — AI Design Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:wght@300;400;500&family=Instrument+Serif:ital@0;1&display=swap"
+    rel="stylesheet">
+  <style>
+    :root {
+      --bg: #080a0f;
+      --surface: #0e1117;
+      --surface2: #141720;
+      --border: rgba(255, 255, 255, 0.07);
+      --border-hover: rgba(255, 255, 255, 0.15);
+      --text: #f0f2f7;
+      --text-muted: #6b7280;
+      --text-dim: #374151;
+      --accent: #7c6cff;
+      --accent2: #c084fc;
+      --accent3: #38bdf8;
+      --glow: rgba(124, 108, 255, 0.25);
+      --glow2: rgba(192, 132, 252, 0.15);
+      --success: #4ade80;
+      --warning: #fbbf24;
+      --error: #f87171;
+      --radius: 14px;
+      --radius-sm: 8px;
+      --mono: 'DM Mono', monospace;
+      --sans: 'Syne', sans-serif;
+      --serif: 'Instrument Serif', serif;
+    }
 
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
 
-  body {
-    font-family: var(--sans);
-    background: var(--bg);
-    color: var(--text);
-    min-height: 100vh;
-    overflow-x: hidden;
-  }
+    body {
+      font-family: var(--sans);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
 
-  /* ─── NOISE OVERLAY ─── */
-  body::before {
-    content: '';
-    position: fixed;
-    inset: 0;
-    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
-    pointer-events: none;
-    z-index: 0;
-  }
+    /* ─── NOISE OVERLAY ─── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+      pointer-events: none;
+      z-index: 0;
+    }
 
-  /* ─── AMBIENT BG ─── */
-  .ambient {
-    position: fixed;
-    top: -30%;
-    left: -10%;
-    width: 70vw;
-    height: 70vh;
-    background: radial-gradient(ellipse at center, rgba(124,108,255,0.08) 0%, transparent 65%);
-    pointer-events: none;
-    z-index: 0;
-    animation: drift 18s ease-in-out infinite alternate;
-  }
-  .ambient2 {
-    top: 40%;
-    right: -15%;
-    left: auto;
-    width: 50vw;
-    height: 50vh;
-    background: radial-gradient(ellipse, rgba(192,132,252,0.06) 0%, transparent 65%);
-    animation: drift 22s ease-in-out infinite alternate-reverse;
-  }
-  @keyframes drift { to { transform: translate(40px, 20px) scale(1.05); } }
+    /* ─── AMBIENT BG ─── */
+    .ambient {
+      position: fixed;
+      top: -30%;
+      left: -10%;
+      width: 70vw;
+      height: 70vh;
+      background: radial-gradient(ellipse at center, rgba(124, 108, 255, 0.08) 0%, transparent 65%);
+      pointer-events: none;
+      z-index: 0;
+      animation: drift 18s ease-in-out infinite alternate;
+    }
 
-  /* ─── HEADER ─── */
-  header {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    z-index: 100;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 18px 32px;
-    background: rgba(8,10,15,0.8);
-    backdrop-filter: blur(20px);
-    border-bottom: 1px solid var(--border);
-  }
+    .ambient2 {
+      top: 40%;
+      right: -15%;
+      left: auto;
+      width: 50vw;
+      height: 50vh;
+      background: radial-gradient(ellipse, rgba(192, 132, 252, 0.06) 0%, transparent 65%);
+      animation: drift 22s ease-in-out infinite alternate-reverse;
+    }
 
-  .logo {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 20px;
-    font-weight: 800;
-    letter-spacing: -0.5px;
-    color: var(--text);
-    text-decoration: none;
-  }
-  .logo-mark {
-    width: 32px;
-    height: 32px;
-    border-radius: 9px;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 16px;
-  }
-  .logo em {
-    font-family: var(--serif);
-    font-style: italic;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    background-clip: text;
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-  }
+    @keyframes drift {
+      to {
+        transform: translate(40px, 20px) scale(1.05);
+      }
+    }
 
-  nav {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .nav-tab {
-    padding: 7px 16px;
-    border-radius: 8px;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-muted);
-    cursor: pointer;
-    border: none;
-    background: transparent;
-    transition: all 0.2s;
-    letter-spacing: 0.2px;
-  }
-  .nav-tab:hover { color: var(--text); background: var(--surface2); }
-  .nav-tab.active {
-    color: var(--text);
-    background: var(--surface2);
-    border: 1px solid var(--border-hover);
-  }
+    /* ─── HEADER ─── */
+    header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 32px;
+      background: rgba(8, 10, 15, 0.8);
+      backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--border);
+    }
 
-  .header-actions {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-  .btn-ghost {
-    padding: 8px 16px;
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    font-weight: 600;
-    font-family: var(--sans);
-    color: var(--text-muted);
-    border: 1px solid var(--border);
-    background: transparent;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-  .btn-ghost:hover { color: var(--text); border-color: var(--border-hover); }
-  .btn-primary {
-    padding: 8px 18px;
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    font-weight: 700;
-    font-family: var(--sans);
-    color: #fff;
-    border: none;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    cursor: pointer;
-    transition: all 0.2s;
-    box-shadow: 0 0 20px var(--glow);
-  }
-  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 0 30px var(--glow); }
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      color: var(--text);
+      text-decoration: none;
+    }
 
-  /* ─── MAIN LAYOUT ─── */
-  main {
-    padding-top: 73px;
-    height: 100vh;
-    display: flex;
-    overflow: hidden;
-    position: relative;
-    z-index: 1;
-  }
+    .logo-mark {
+      width: 32px;
+      height: 32px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+    }
 
-  /* ─── LEFT PANEL (SIDEBAR) ─── */
-  .sidebar {
-    width: 300px;
-    flex-shrink: 0;
-    border-right: 1px solid var(--border);
-    background: var(--surface);
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    overflow: hidden;
-  }
+    .logo em {
+      font-family: var(--serif);
+      font-style: italic;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      background-clip: text;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
 
-  .sidebar-top {
-    padding: 20px;
-    border-bottom: 1px solid var(--border);
-  }
+    nav {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
 
-  .section-label {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    color: var(--text-dim);
-    margin-bottom: 12px;
-    font-family: var(--mono);
-  }
+    .nav-tab {
+      padding: 7px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+      cursor: pointer;
+      border: none;
+      background: transparent;
+      transition: all 0.2s;
+      letter-spacing: 0.2px;
+    }
 
-  /* Platform selector */
-  .platform-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    gap: 6px;
-  }
-  .platform-btn {
-    padding: 10px 6px;
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--text-muted);
-    font-family: var(--sans);
-    font-size: 11px;
-    font-weight: 600;
-    cursor: pointer;
-    text-align: center;
-    transition: all 0.2s;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 5px;
-  }
-  .platform-btn svg { opacity: 0.5; }
-  .platform-btn:hover { border-color: var(--border-hover); color: var(--text); }
-  .platform-btn.active {
-    border-color: var(--accent);
-    background: rgba(124,108,255,0.1);
-    color: var(--accent);
-    box-shadow: 0 0 12px var(--glow);
-  }
-  .platform-btn.active svg { opacity: 1; }
+    .nav-tab:hover {
+      color: var(--text);
+      background: var(--surface2);
+    }
 
-  /* Mode selector */
-  .mode-list {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    padding: 12px;
-    flex: 1;
-    overflow-y: auto;
-  }
-  .mode-item {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 12px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    border: 1px solid transparent;
-    transition: all 0.2s;
-    color: var(--text-muted);
-    font-size: 13px;
-    font-weight: 600;
-  }
-  .mode-item:hover { background: var(--surface2); color: var(--text); }
-  .mode-item.active {
-    background: rgba(124,108,255,0.1);
-    border-color: rgba(124,108,255,0.3);
-    color: var(--accent);
-  }
-  .mode-icon {
-    width: 30px;
-    height: 30px;
-    border-radius: 7px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 15px;
-    flex-shrink: 0;
-  }
-  .mode-item.active .mode-icon { background: rgba(124,108,255,0.15); }
-  .mode-item:not(.active) .mode-icon { background: var(--bg); }
+    .nav-tab.active {
+      color: var(--text);
+      background: var(--surface2);
+      border: 1px solid var(--border-hover);
+    }
 
-  .mode-meta {
-    flex: 1;
-    min-width: 0;
-  }
-  .mode-name { display: block; }
-  .mode-desc { display: block; font-size: 10px; color: var(--text-dim); font-weight: 400; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .mode-item.active .mode-desc { color: rgba(124,108,255,0.6); }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
 
-  .mode-badge {
-    font-size: 9px;
-    font-weight: 700;
-    font-family: var(--mono);
-    letter-spacing: 0.5px;
-    padding: 2px 7px;
-    border-radius: 20px;
-    background: rgba(124,108,255,0.15);
-    color: var(--accent);
-    flex-shrink: 0;
-  }
+    .btn-ghost {
+      padding: 8px 16px;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      font-weight: 600;
+      font-family: var(--sans);
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+      background: transparent;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
 
-  /* Session history */
-  .history-panel {
-    padding: 0 12px 16px;
-    border-top: 1px solid var(--border);
-  }
-  .history-label {
-    padding: 12px 0 8px;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    color: var(--text-dim);
-    font-family: var(--mono);
-  }
-  .history-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 10px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    transition: background 0.15s;
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-  .history-item:hover { background: var(--surface2); color: var(--text); }
-  .history-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .btn-ghost:hover {
+      color: var(--text);
+      border-color: var(--border-hover);
+    }
 
-  /* ─── CENTER (CHAT + CANVAS) ─── */
-  .workspace {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    background: var(--bg);
-  }
+    .btn-primary {
+      padding: 8px 18px;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      font-weight: 700;
+      font-family: var(--sans);
+      color: #fff;
+      border: none;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      cursor: pointer;
+      transition: all 0.2s;
+      box-shadow: 0 0 20px var(--glow);
+    }
 
-  /* Canvas / gallery area */
-  .canvas-area {
-    flex: 1;
-    overflow-y: auto;
-    padding: 32px;
-    display: flex;
-    flex-direction: column;
-    gap: 28px;
-    scrollbar-width: thin;
-    scrollbar-color: var(--border) transparent;
-  }
-  .canvas-item-shell {
-    width: 100%;
-    align-self: stretch;
-    display: block;
-  }
-  .canvas-item-shell > * {
-    width: 100%;
-    max-width: 100%;
-  }
+    .btn-primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 0 30px var(--glow);
+    }
 
-  /* Welcome state */
-  .welcome {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    padding: 60px 40px;
-    gap: 24px;
-    animation: fadeUp 0.6s ease both;
-  }
-  @keyframes fadeUp { from { opacity:0; transform:translateY(20px); } to { opacity:1; transform:translateY(0); } }
+    /* ─── MAIN LAYOUT ─── */
+    main {
+      padding-top: 73px;
+      height: 100vh;
+      display: flex;
+      overflow: hidden;
+      position: relative;
+      z-index: 1;
+    }
 
-  .welcome-orb {
-    width: 80px;
-    height: 80px;
-    border-radius: 50%;
-    background: conic-gradient(from 180deg, var(--accent), var(--accent2), var(--accent3), var(--accent));
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 36px;
-    box-shadow: 0 0 60px var(--glow), 0 0 120px var(--glow2);
-    animation: spin 10s linear infinite;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .welcome-orb-inner {
-    width: 68px;
-    height: 68px;
-    border-radius: 50%;
-    background: var(--bg);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 32px;
-  }
+    /* ─── LEFT PANEL (SIDEBAR) ─── */
+    .sidebar {
+      width: 300px;
+      flex-shrink: 0;
+      border-right: 1px solid var(--border);
+      background: var(--surface);
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      overflow: hidden;
+    }
 
-  .welcome h1 {
-    font-size: 36px;
-    font-weight: 800;
-    letter-spacing: -1px;
-    line-height: 1.1;
-  }
-  .welcome h1 span { font-family: var(--serif); font-style: italic; background: linear-gradient(135deg, var(--accent), var(--accent2)); background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .sidebar-top {
+      padding: 20px;
+      border-bottom: 1px solid var(--border);
+    }
 
-  .welcome p { font-size: 15px; color: var(--text-muted); max-width: 400px; line-height: 1.7; }
+    .section-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      margin-bottom: 12px;
+      font-family: var(--mono);
+    }
 
-  .quick-prompts {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    justify-content: center;
-    margin-top: 8px;
-    max-width: 580px;
-  }
-  .quick-chip {
-    padding: 8px 16px;
-    border-radius: 40px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition: all 0.2s;
-    font-family: var(--sans);
-  }
-  .quick-chip:hover { border-color: var(--accent); color: var(--accent); background: rgba(124,108,255,0.08); }
+    /* Platform selector */
+    .platform-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 6px;
+    }
 
-  /* Message bubbles */
-  .message {
-    display: flex;
-    gap: 12px;
-    animation: fadeUp 0.3s ease both;
-  }
-  .message.user { flex-direction: row-reverse; }
-  .msg-avatar {
-    width: 32px;
-    height: 32px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 14px;
-    font-weight: 700;
-  }
-  .msg-avatar.ai { background: linear-gradient(135deg, var(--accent), var(--accent2)); }
-  .msg-avatar.user { background: var(--surface2); border: 1px solid var(--border); font-size: 11px; }
-  .msg-content { max-width: 520px; }
-  .msg-bubble {
-    padding: 12px 16px;
-    border-radius: var(--radius);
-    font-size: 13.5px;
-    line-height: 1.65;
-  }
-  .message.ai .msg-bubble {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 4px var(--radius) var(--radius) var(--radius);
-  }
-  .message.user .msg-bubble {
-    background: rgba(124,108,255,0.12);
-    border: 1px solid rgba(124,108,255,0.2);
-    border-radius: var(--radius) 4px var(--radius) var(--radius);
-    text-align: right;
-  }
+    .platform-btn {
+      padding: 10px 6px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text-muted);
+      font-family: var(--sans);
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.2s;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 5px;
+    }
 
-  /* Status chip */
-  .status-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 14px;
-    border-radius: 40px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    font-size: 12px;
-    color: var(--text-muted);
-    font-family: var(--mono);
-    animation: pulse 1.5s ease infinite;
-  }
-  .status-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--accent);
-    animation: blink 1s ease infinite;
-  }
-  @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0.2; } }
-  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 var(--glow); } 50% { box-shadow: 0 0 12px 2px var(--glow); } }
+    .platform-btn svg {
+      opacity: 0.5;
+    }
 
-  /* Style guide / screen result card */
-  .result-card {
-    width: 100%;
-    max-width: 1120px;
-    align-self: stretch;
-    display: flex;
-    flex-direction: column;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-    animation: fadeUp 0.4s ease both;
-    transition: border-color 0.2s;
-  }
-  .result-card:hover { border-color: var(--border-hover); }
+    .platform-btn:hover {
+      border-color: var(--border-hover);
+      color: var(--text);
+    }
 
-  .result-card-header {
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
-    padding: 14px 18px;
-    border-bottom: 1px solid var(--border);
-  }
-  .result-card-label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 12px;
-    font-weight: 700;
-    color: var(--text-muted);
-    font-family: var(--mono);
-  }
-  .label-badge {
-    padding: 2px 8px;
-    border-radius: 20px;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.5px;
-  }
-  .badge-guide { background: rgba(56,189,248,0.15); color: var(--accent3); }
-  .badge-screen { background: rgba(124,108,255,0.15); color: var(--accent); }
-  .badge-anchor { background: rgba(251,191,36,0.15); color: var(--warning); }
-  .badge-logo { background: rgba(74,222,128,0.15); color: var(--success); }
-  .badge-social { background: rgba(192,132,252,0.15); color: var(--accent2); }
+    .platform-btn.active {
+      border-color: var(--accent);
+      background: rgba(124, 108, 255, 0.1);
+      color: var(--accent);
+      box-shadow: 0 0 12px var(--glow);
+    }
 
-  .card-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-  .card-btn {
-    padding: 5px 12px;
-    border-radius: 6px;
-    font-size: 11px;
-    font-weight: 600;
-    font-family: var(--sans);
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition: all 0.15s;
-    display: flex;
-    align-items: center;
-    gap: 5px;
-  }
-  .card-btn:hover { background: var(--surface2); color: var(--text); border-color: var(--border-hover); }
-  .card-btn.approve {
-    border-color: rgba(74,222,128,0.4);
-    color: var(--success);
-    background: rgba(74,222,128,0.08);
-  }
-  .card-btn.approve:hover { background: rgba(74,222,128,0.15); }
+    .platform-btn.active svg {
+      opacity: 1;
+    }
 
-  .result-img {
-    flex-shrink: 0;
-    width: 100%;
-    display: block;
-    background: var(--bg);
-    object-fit: contain;
-    min-height: 320px;
-    max-height: min(76vh, 820px);
-    background: linear-gradient(180deg,#0b0b0d, #111);
-  }
-  .landing-preview .result-img {
-    min-height: 420px;
-    max-height: min(88vh, 1020px);
-  }
+    /* Mode selector */
+    .mode-list {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      padding: 12px;
+      flex: 1;
+      overflow-y: auto;
+    }
 
-  /* Screens grid */
-  .screens-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 16px;
-    padding: 18px;
-    align-items: stretch;
-  }
-  .screens-stage {
-    position: relative;
-    min-height: 320px;
-    flex-shrink: 0;
-  }
-  .flow-lines {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    pointer-events: none;
-    z-index: 0;
-    overflow: visible;
-  }
-  .flow-lines path {
-    fill: none;
-    stroke: rgba(124,108,255,0.8);
-    stroke-width: 2.5;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-  .flow-lines path.flow-backdrop {
-    stroke: rgba(124,108,255,0.18);
-    stroke-width: 8;
-    filter: blur(1px);
-  }
-  .flow-lines marker path {
-    fill: rgba(124,108,255,0.95);
-  }
-  .screen-thumb {
-    border-radius: var(--radius-sm);
-    overflow: hidden;
-    border: 1px solid var(--border);
-    cursor: pointer;
-    transition: all 0.2s;
-    position: relative;
-    background: var(--bg);
-    display: flex;
-    flex-direction: column;
-    min-height: 320px;
-  }
-  .screen-thumb:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
-  .screen-thumb img {
-    width: 100%;
-    display: block;
-    flex: 1;
-    min-height: 240px;
-    object-fit: contain;
-    background: linear-gradient(180deg,#0b0b0d, #111);
-  }
-  .screen-thumb[data-node-id] { position: relative; z-index: 1; }
-  .screen-thumb.anchor-thumb { border-color: rgba(251,191,36,0.35); }
-  .screen-thumb-label {
-    flex-shrink: 0;
-    padding: 8px 12px;
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-muted);
-    font-family: var(--mono);
-    border-top: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .screen-num { color: var(--text-dim); }
+    .mode-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: all 0.2s;
+      color: var(--text-muted);
+      font-size: 13px;
+      font-weight: 600;
+    }
 
-  .screens-stage > .screens-grid {
-    position: relative;
-    z-index: 1;
-  }
+    .mode-item:hover {
+      background: var(--surface2);
+      color: var(--text);
+    }
 
-  @media (max-width: 1100px) {
-    .result-card { max-width: 100%; }
-    .screens-grid { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
-  }
+    .mode-item.active {
+      background: rgba(124, 108, 255, 0.1);
+      border-color: rgba(124, 108, 255, 0.3);
+      color: var(--accent);
+    }
 
-  @media (max-width: 820px) {
-    .result-card-header { align-items: flex-start; }
-    .card-actions { width: 100%; justify-content: flex-start; }
-    .result-img { min-height: 260px; max-height: 66vh; }
-    .screens-grid { grid-template-columns: 1fr; }
-    .screen-thumb { min-height: 280px; }
-    .screen-thumb img { min-height: 220px; }
-  }
+    .mode-icon {
+      width: 30px;
+      height: 30px;
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+      flex-shrink: 0;
+    }
 
-  /* Anchor preview special */
-  .anchor-preview {
-    border-color: rgba(251,191,36,0.3);
-    box-shadow: 0 0 30px rgba(251,191,36,0.08);
-  }
-  .anchor-actions {
-    display: flex;
-    gap: 10px;
-    padding: 16px 18px;
-    border-top: 1px solid var(--border);
-    background: rgba(251,191,36,0.03);
-  }
-  .anchor-info {
-    flex: 1;
-    font-size: 12px;
-    color: var(--text-muted);
-    line-height: 1.5;
-  }
-  .anchor-info strong { color: var(--warning); }
+    .mode-item.active .mode-icon {
+      background: rgba(124, 108, 255, 0.15);
+    }
 
-  /* ─── INPUT AREA ─── */
-  .input-area {
-    padding: 16px 24px;
-    border-top: 1px solid var(--border);
-    background: var(--surface);
-  }
+    .mode-item:not(.active) .mode-icon {
+      background: var(--bg);
+    }
 
-  .reference-strip {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 10px;
-    flex-wrap: wrap;
-  }
-  .ref-thumb {
-    width: 44px;
-    height: 44px;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    object-fit: cover;
-    cursor: pointer;
-    position: relative;
-    overflow: hidden;
-  }
-  .ref-label {
-    font-size: 11px;
-    color: var(--text-muted);
-    font-family: var(--mono);
-  }
-  .ref-remove {
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: var(--error);
-    color: white;
-    font-size: 10px;
-    border: none;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 700;
-  }
+    .mode-meta {
+      flex: 1;
+      min-width: 0;
+    }
 
-  .input-row {
-    display: flex;
-    align-items: flex-end;
-    gap: 10px;
-  }
-  .input-box {
-    flex: 1;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 13px 16px;
-    font-family: var(--sans);
-    font-size: 14px;
-    color: var(--text);
-    resize: none;
-    outline: none;
-    transition: border-color 0.2s, box-shadow 0.2s;
-    min-height: 50px;
-    max-height: 160px;
-    line-height: 1.6;
-  }
-  .input-box::placeholder { color: var(--text-dim); }
-  .input-box:focus {
-    border-color: rgba(124,108,255,0.4);
-    box-shadow: 0 0 0 3px rgba(124,108,255,0.08);
-  }
+    .mode-name {
+      display: block;
+    }
 
-  .input-controls {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .send-btn {
-    width: 44px;
-    height: 44px;
-    border-radius: 12px;
-    border: none;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    color: white;
-    font-size: 18px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.2s;
-    box-shadow: 0 0 20px var(--glow);
-  }
-  .send-btn:hover { transform: scale(1.05); box-shadow: 0 0 30px var(--glow); }
-  .send-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-  .upload-btn {
-    width: 44px;
-    height: 44px;
-    border-radius: 12px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--text-muted);
-    font-size: 18px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.2s;
-  }
-  .upload-btn:hover { color: var(--text); border-color: var(--border-hover); }
+    .mode-desc {
+      display: block;
+      font-size: 10px;
+      color: var(--text-dim);
+      font-weight: 400;
+      margin-top: 1px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
 
-  .input-hint {
-    margin-top: 8px;
-    font-size: 11px;
-    color: var(--text-dim);
-    font-family: var(--mono);
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-  .hint-tag {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 2px 8px;
-    border-radius: 4px;
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    color: var(--text-muted);
-    font-size: 10px;
-  }
+    .mode-item.active .mode-desc {
+      color: rgba(124, 108, 255, 0.6);
+    }
 
-  /* ─── RIGHT PANEL ─── */
-  .right-panel {
-    width: 260px;
-    flex-shrink: 0;
-    border-left: 1px solid var(--border);
-    background: var(--surface);
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    overflow: hidden;
-  }
+    .mode-badge {
+      font-size: 9px;
+      font-weight: 700;
+      font-family: var(--mono);
+      letter-spacing: 0.5px;
+      padding: 2px 7px;
+      border-radius: 20px;
+      background: rgba(124, 108, 255, 0.15);
+      color: var(--accent);
+      flex-shrink: 0;
+    }
 
-  .panel-section {
-    padding: 16px;
-    border-bottom: 1px solid var(--border);
-  }
+    /* Session history */
+    .history-panel {
+      padding: 0 12px 16px;
+      border-top: 1px solid var(--border);
+    }
 
-  /* Connection status */
-  .conn-status {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 12px;
-    font-family: var(--mono);
-    color: var(--text-muted);
-  }
-  .conn-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--text-dim);
-    flex-shrink: 0;
-  }
-  .conn-dot.connected { background: var(--success); box-shadow: 0 0 8px rgba(74,222,128,0.5); }
-  .conn-dot.connecting { background: var(--warning); animation: blink 0.8s infinite; }
-  .conn-dot.error { background: var(--error); }
+    .history-label {
+      padding: 12px 0 8px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      font-family: var(--mono);
+    }
 
-  /* WS endpoint display */
-  .ws-url {
-    margin-top: 8px;
-    font-size: 10px;
-    font-family: var(--mono);
-    color: var(--text-dim);
-    word-break: break-all;
-    line-height: 1.4;
-  }
-  .ws-url strong { color: var(--accent); }
+    .history-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: background 0.15s;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
 
-  /* Events log */
-  .events-log {
-    flex: 1;
-    overflow-y: auto;
-    padding: 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    scrollbar-width: thin;
-    scrollbar-color: var(--border) transparent;
-  }
-  .event-item {
-    display: flex;
-    align-items: flex-start;
-    gap: 7px;
-    padding: 6px 8px;
-    border-radius: 6px;
-    font-size: 11px;
-    font-family: var(--mono);
-    line-height: 1.4;
-    background: var(--bg);
-    border: 1px solid transparent;
-    animation: fadeUp 0.2s ease both;
-  }
-  .event-icon { flex-shrink: 0; font-size: 13px; }
-  .event-body { flex: 1; min-width: 0; }
-  .event-name { font-weight: 600; color: var(--accent); display: block; }
-  .event-data { color: var(--text-muted); display: block; font-size: 10px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .event-item.error-ev { border-color: rgba(248,113,113,0.2); background: rgba(248,113,113,0.04); }
-  .event-item.error-ev .event-name { color: var(--error); }
-  .event-ts { color: var(--text-dim); flex-shrink: 0; font-size: 9px; }
+    .history-item:hover {
+      background: var(--surface2);
+      color: var(--text);
+    }
 
-  /* Session info */
-  .session-info {
-    font-size: 10px;
-    font-family: var(--mono);
-    color: var(--text-dim);
-    line-height: 1.8;
-  }
-  .session-key { color: var(--text-muted); }
-  .session-val { color: var(--accent2); }
+    .history-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
 
-  /* Error banner */
-  .error-banner {
-    margin: 16px;
-    padding: 12px 14px;
-    border-radius: var(--radius-sm);
-    background: rgba(248,113,113,0.08);
-    border: 1px solid rgba(248,113,113,0.25);
-    font-size: 12px;
-    color: var(--error);
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    animation: fadeUp 0.3s ease both;
-  }
+    /* ─── CENTER (CHAT + CANVAS) ─── */
+    .workspace {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      background: var(--bg);
+    }
 
-  /* Progress ring */
-  .progress-wrap {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 16px 18px;
-    background: var(--surface);
-    border-radius: var(--radius);
-    border: 1px solid var(--border);
-    animation: fadeUp 0.3s ease both;
-  }
-  .progress-ring { flex-shrink: 0; }
-  svg.ring { animation: spin 2s linear infinite; }
-  .progress-text { flex: 1; }
-  .progress-label { font-size: 13px; font-weight: 600; color: var(--text); }
-  .progress-sub { font-size: 11px; color: var(--text-muted); font-family: var(--mono); margin-top: 2px; }
+    /* Canvas / gallery area */
+    .canvas-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 32px;
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
 
-  /* Zoom overlay */
-  .zoom-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.9);
-    z-index: 999;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: zoom-out;
-    backdrop-filter: blur(8px);
-    animation: fadeUp 0.2s ease both;
-  }
-  .zoom-overlay img {
-    max-width: 90vw;
-    max-height: 90vh;
-    object-fit: contain;
-    border-radius: var(--radius);
-    box-shadow: 0 40px 120px rgba(0,0,0,0.8);
-  }
-  .zoom-close {
-    position: fixed;
-    top: 24px;
-    right: 24px;
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text);
-    font-size: 18px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.2s;
-  }
-  .zoom-close:hover { background: var(--surface2); }
+    .canvas-item-shell {
+      width: 100%;
+      align-self: stretch;
+      display: block;
+    }
 
-  /* Scrollbar */
-  ::-webkit-scrollbar { width: 5px; height: 5px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    .canvas-item-shell>* {
+      width: 100%;
+      max-width: 100%;
+    }
 
-  /* Toast */
-  .toast {
-    position: fixed;
-    bottom: 100px;
-    left: 50%;
-    transform: translateX(-50%);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 40px;
-    padding: 10px 20px;
-    font-size: 13px;
-    color: var(--text);
-    z-index: 500;
-    animation: toastIn 0.3s ease both;
-  }
-  @keyframes toastIn { from { opacity:0; transform:translateX(-50%) translateY(10px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }
+    /* Welcome state */
+    .welcome {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 60px 40px;
+      gap: 24px;
+      animation: fadeUp 0.6s ease both;
+    }
 
-  /* Divider */
-  .divider { border: none; border-top: 1px solid var(--border); margin: 0; }
+    @keyframes fadeUp {
+      from {
+        opacity: 0;
+        transform: translateY(20px);
+      }
 
-  /* Empty events */
-  .events-empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    flex: 1;
-    gap: 8px;
-    color: var(--text-dim);
-    font-size: 12px;
-    font-family: var(--mono);
-    padding: 24px;
-    text-align: center;
-  }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
 
-  .tag-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    border-radius: 20px;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.4px;
-    font-family: var(--mono);
-  }
+    .welcome-orb {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      background: conic-gradient(from 180deg, var(--accent), var(--accent2), var(--accent3), var(--accent));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 36px;
+      box-shadow: 0 0 60px var(--glow), 0 0 120px var(--glow2);
+      animation: spin 10s linear infinite;
+    }
 
-  /* Server config input */
-  .config-input {
-    width: 100%;
-    padding: 8px 12px;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--mono);
-    font-size: 11px;
-    outline: none;
-    transition: border-color 0.2s;
-  }
-  .config-input:focus { border-color: rgba(124,108,255,0.4); }
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
 
-  /* Screens container within card */
-  .screens-container { padding: 0 18px 18px; }
-</style>
+    .welcome-orb-inner {
+      width: 68px;
+      height: 68px;
+      border-radius: 50%;
+      background: var(--bg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+    }
+
+    .welcome h1 {
+      font-size: 36px;
+      font-weight: 800;
+      letter-spacing: -1px;
+      line-height: 1.1;
+    }
+
+    .welcome h1 span {
+      font-family: var(--serif);
+      font-style: italic;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      background-clip: text;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .welcome p {
+      font-size: 15px;
+      color: var(--text-muted);
+      max-width: 400px;
+      line-height: 1.7;
+    }
+
+    .quick-prompts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: center;
+      margin-top: 8px;
+      max-width: 580px;
+    }
+
+    .quick-chip {
+      padding: 8px 16px;
+      border-radius: 40px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.2s;
+      font-family: var(--sans);
+    }
+
+    .quick-chip:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: rgba(124, 108, 255, 0.08);
+    }
+
+    /* Message bubbles */
+    .message {
+      display: flex;
+      gap: 12px;
+      animation: fadeUp 0.3s ease both;
+    }
+
+    .message.user {
+      flex-direction: row-reverse;
+    }
+
+    .msg-avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .msg-avatar.ai {
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+    }
+
+    .msg-avatar.user {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      font-size: 11px;
+    }
+
+    .msg-content {
+      max-width: 520px;
+    }
+
+    .msg-bubble {
+      padding: 12px 16px;
+      border-radius: var(--radius);
+      font-size: 13.5px;
+      line-height: 1.65;
+    }
+
+    .message.ai .msg-bubble {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px var(--radius) var(--radius) var(--radius);
+    }
+
+    .message.user .msg-bubble {
+      background: rgba(124, 108, 255, 0.12);
+      border: 1px solid rgba(124, 108, 255, 0.2);
+      border-radius: var(--radius) 4px var(--radius) var(--radius);
+      text-align: right;
+    }
+
+    /* Status chip */
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      border-radius: 40px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: var(--mono);
+      animation: pulse 1.5s ease infinite;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      animation: blink 1s ease infinite;
+    }
+
+    @keyframes blink {
+
+      0%,
+      100% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0.2;
+      }
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        box-shadow: 0 0 0 0 var(--glow);
+      }
+
+      50% {
+        box-shadow: 0 0 12px 2px var(--glow);
+      }
+    }
+
+    /* Style guide / screen result card */
+    .result-card {
+      width: 100%;
+      max-width: 1120px;
+      align-self: stretch;
+      display: flex;
+      flex-direction: column;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      animation: fadeUp 0.4s ease both;
+      transition: border-color 0.2s;
+    }
+
+    .result-card:hover {
+      border-color: var(--border-hover);
+    }
+
+    .result-card-header {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .result-card-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-muted);
+      font-family: var(--mono);
+    }
+
+    .label-badge {
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
+
+    .badge-guide {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent3);
+    }
+
+    .badge-screen {
+      background: rgba(124, 108, 255, 0.15);
+      color: var(--accent);
+    }
+
+    .badge-anchor {
+      background: rgba(251, 191, 36, 0.15);
+      color: var(--warning);
+    }
+
+    .badge-logo {
+      background: rgba(74, 222, 128, 0.15);
+      color: var(--success);
+    }
+
+    .badge-social {
+      background: rgba(192, 132, 252, 0.15);
+      color: var(--accent2);
+    }
+
+    .card-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .card-btn {
+      padding: 5px 12px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: var(--sans);
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .card-btn:hover {
+      background: var(--surface2);
+      color: var(--text);
+      border-color: var(--border-hover);
+    }
+
+    .card-btn.approve {
+      border-color: rgba(74, 222, 128, 0.4);
+      color: var(--success);
+      background: rgba(74, 222, 128, 0.08);
+    }
+
+    .card-btn.approve:hover {
+      background: rgba(74, 222, 128, 0.15);
+    }
+
+    .result-img {
+      flex-shrink: 0;
+      width: 100%;
+      display: block;
+      background: var(--bg);
+      object-fit: contain;
+      min-height: 320px;
+      max-height: min(76vh, 820px);
+      background: linear-gradient(180deg, #0b0b0d, #111);
+    }
+
+    .landing-preview .result-img {
+      min-height: 420px;
+      max-height: min(88vh, 1020px);
+    }
+
+    /* Screens grid */
+    .screens-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+      padding: 18px;
+      align-items: stretch;
+    }
+
+    .screens-stage {
+      position: relative;
+      min-height: 320px;
+      flex-shrink: 0;
+    }
+
+    .flow-lines {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 0;
+      overflow: visible;
+    }
+
+    .flow-lines path {
+      fill: none;
+      stroke: rgba(124, 108, 255, 0.8);
+      stroke-width: 2.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .flow-lines path.flow-backdrop {
+      stroke: rgba(124, 108, 255, 0.18);
+      stroke-width: 8;
+      filter: blur(1px);
+    }
+
+    .flow-lines marker path {
+      fill: rgba(124, 108, 255, 0.95);
+    }
+
+    .screen-thumb {
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: all 0.2s;
+      position: relative;
+      background: var(--bg);
+      display: flex;
+      flex-direction: column;
+      min-height: 320px;
+    }
+
+    .screen-thumb:hover {
+      border-color: var(--accent);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    }
+
+    .screen-thumb img {
+      width: 100%;
+      display: block;
+      flex: 1;
+      min-height: 240px;
+      object-fit: contain;
+      background: linear-gradient(180deg, #0b0b0d, #111);
+    }
+
+    .screen-thumb[data-node-id] {
+      position: relative;
+      z-index: 1;
+    }
+
+    .screen-thumb.anchor-thumb {
+      border-color: rgba(251, 191, 36, 0.35);
+    }
+
+    .screen-thumb-label {
+      flex-shrink: 0;
+      padding: 8px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      font-family: var(--mono);
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .screen-num {
+      color: var(--text-dim);
+    }
+
+    .screens-stage>.screens-grid {
+      position: relative;
+      z-index: 1;
+    }
+
+    @media (max-width: 1100px) {
+      .result-card {
+        max-width: 100%;
+      }
+
+      .screens-grid {
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      }
+    }
+
+    @media (max-width: 820px) {
+      .result-card-header {
+        align-items: flex-start;
+      }
+
+      .card-actions {
+        width: 100%;
+        justify-content: flex-start;
+      }
+
+      .result-img {
+        min-height: 260px;
+        max-height: 66vh;
+      }
+
+      .screens-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .screen-thumb {
+        min-height: 280px;
+      }
+
+      .screen-thumb img {
+        min-height: 220px;
+      }
+    }
+
+    /* Anchor preview special */
+    .anchor-preview {
+      border-color: rgba(251, 191, 36, 0.3);
+      box-shadow: 0 0 30px rgba(251, 191, 36, 0.08);
+    }
+
+    .anchor-actions {
+      display: flex;
+      gap: 10px;
+      padding: 16px 18px;
+      border-top: 1px solid var(--border);
+      background: rgba(251, 191, 36, 0.03);
+    }
+
+    .anchor-info {
+      flex: 1;
+      font-size: 12px;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    .anchor-info strong {
+      color: var(--warning);
+    }
+
+    /* ─── INPUT AREA ─── */
+    .input-area {
+      padding: 16px 24px;
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+    }
+
+    .reference-strip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+
+    .ref-thumb {
+      width: 44px;
+      height: 44px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      object-fit: cover;
+      cursor: pointer;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .ref-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-family: var(--mono);
+    }
+
+    .ref-remove {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--error);
+      color: white;
+      font-size: 10px;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+    }
+
+    .input-row {
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+    }
+
+    .input-box {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 13px 16px;
+      font-family: var(--sans);
+      font-size: 14px;
+      color: var(--text);
+      resize: none;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      min-height: 50px;
+      max-height: 160px;
+      line-height: 1.6;
+    }
+
+    .input-box::placeholder {
+      color: var(--text-dim);
+    }
+
+    .input-box:focus {
+      border-color: rgba(124, 108, 255, 0.4);
+      box-shadow: 0 0 0 3px rgba(124, 108, 255, 0.08);
+    }
+
+    .input-controls {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .send-btn {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      border: none;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: white;
+      font-size: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+      box-shadow: 0 0 20px var(--glow);
+    }
+
+    .send-btn:hover {
+      transform: scale(1.05);
+      box-shadow: 0 0 30px var(--glow);
+    }
+
+    .send-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .upload-btn {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text-muted);
+      font-size: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+    }
+
+    .upload-btn:hover {
+      color: var(--text);
+      border-color: var(--border-hover);
+    }
+
+    .input-hint {
+      margin-top: 8px;
+      font-size: 11px;
+      color: var(--text-dim);
+      font-family: var(--mono);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .hint-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 10px;
+    }
+
+    /* ─── RIGHT PANEL ─── */
+    .right-panel {
+      width: 260px;
+      flex-shrink: 0;
+      border-left: 1px solid var(--border);
+      background: var(--surface);
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    .panel-section {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    /* Connection status */
+    .conn-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-family: var(--mono);
+      color: var(--text-muted);
+    }
+
+    .conn-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-dim);
+      flex-shrink: 0;
+    }
+
+    .conn-dot.connected {
+      background: var(--success);
+      box-shadow: 0 0 8px rgba(74, 222, 128, 0.5);
+    }
+
+    .conn-dot.connecting {
+      background: var(--warning);
+      animation: blink 0.8s infinite;
+    }
+
+    .conn-dot.error {
+      background: var(--error);
+    }
+
+    /* WS endpoint display */
+    .ws-url {
+      margin-top: 8px;
+      font-size: 10px;
+      font-family: var(--mono);
+      color: var(--text-dim);
+      word-break: break-all;
+      line-height: 1.4;
+    }
+
+    .ws-url strong {
+      color: var(--accent);
+    }
+
+    /* Events log */
+    .events-log {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+
+    .event-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 7px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-family: var(--mono);
+      line-height: 1.4;
+      background: var(--bg);
+      border: 1px solid transparent;
+      animation: fadeUp 0.2s ease both;
+    }
+
+    .event-icon {
+      flex-shrink: 0;
+      font-size: 13px;
+    }
+
+    .event-body {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .event-name {
+      font-weight: 600;
+      color: var(--accent);
+      display: block;
+    }
+
+    .event-data {
+      color: var(--text-muted);
+      display: block;
+      font-size: 10px;
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .event-item.error-ev {
+      border-color: rgba(248, 113, 113, 0.2);
+      background: rgba(248, 113, 113, 0.04);
+    }
+
+    .event-item.error-ev .event-name {
+      color: var(--error);
+    }
+
+    .event-ts {
+      color: var(--text-dim);
+      flex-shrink: 0;
+      font-size: 9px;
+    }
+
+    /* Session info */
+    .session-info {
+      font-size: 10px;
+      font-family: var(--mono);
+      color: var(--text-dim);
+      line-height: 1.8;
+    }
+
+    .session-key {
+      color: var(--text-muted);
+    }
+
+    .session-val {
+      color: var(--accent2);
+    }
+
+    /* Error banner */
+    .error-banner {
+      margin: 16px;
+      padding: 12px 14px;
+      border-radius: var(--radius-sm);
+      background: rgba(248, 113, 113, 0.08);
+      border: 1px solid rgba(248, 113, 113, 0.25);
+      font-size: 12px;
+      color: var(--error);
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      animation: fadeUp 0.3s ease both;
+    }
+
+    /* Progress ring */
+    .progress-wrap {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 16px 18px;
+      background: var(--surface);
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      animation: fadeUp 0.3s ease both;
+    }
+
+    .progress-ring {
+      flex-shrink: 0;
+    }
+
+    svg.ring {
+      animation: spin 2s linear infinite;
+    }
+
+    .progress-text {
+      flex: 1;
+    }
+
+    .progress-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .progress-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-family: var(--mono);
+      margin-top: 2px;
+    }
+
+    /* Zoom overlay */
+    .zoom-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.9);
+      z-index: 999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: zoom-out;
+      backdrop-filter: blur(8px);
+      animation: fadeUp 0.2s ease both;
+    }
+
+    .zoom-overlay img {
+      max-width: 90vw;
+      max-height: 90vh;
+      object-fit: contain;
+      border-radius: var(--radius);
+      box-shadow: 0 40px 120px rgba(0, 0, 0, 0.8);
+    }
+
+    .zoom-close {
+      position: fixed;
+      top: 24px;
+      right: 24px;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 18px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+    }
+
+    .zoom-close:hover {
+      background: var(--surface2);
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar {
+      width: 5px;
+      height: 5px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 4px;
+    }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      bottom: 100px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 40px;
+      padding: 10px 20px;
+      font-size: 13px;
+      color: var(--text);
+      z-index: 500;
+      animation: toastIn 0.3s ease both;
+    }
+
+    @keyframes toastIn {
+      from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(10px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+    }
+
+    /* Divider */
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 0;
+    }
+
+    /* Empty events */
+    .events-empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      flex: 1;
+      gap: 8px;
+      color: var(--text-dim);
+      font-size: 12px;
+      font-family: var(--mono);
+      padding: 24px;
+      text-align: center;
+    }
+
+    .tag-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 20px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.4px;
+      font-family: var(--mono);
+    }
+
+    /* Server config input */
+    .config-input {
+      width: 100%;
+      padding: 8px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 11px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .config-input:focus {
+      border-color: rgba(124, 108, 255, 0.4);
+    }
+
+    /* Screens container within card */
+    .screens-container {
+      padding: 0 18px 18px;
+    }
+  </style>
 </head>
+
 <body>
-<div class="ambient"></div>
-<div class="ambient ambient2"></div>
+  <div class="ambient"></div>
+  <div class="ambient ambient2"></div>
 
-<!-- ZOOM OVERLAY -->
-<div class="zoom-overlay" id="zoomOverlay" style="display:none;" onclick="closeZoom()">
-  <button class="zoom-close" onclick="closeZoom()">✕</button>
-  <img id="zoomImg" src="" alt="">
-</div>
-
-<!-- HEADER -->
-<header>
-  <a href="#" class="logo">
-    <span class="logo-mark">◈</span>
-    Morph<em>ic</em>
-  </a>
-  <nav>
-    <button class="nav-tab active" onclick="switchTab(this,'ui')">UI Flow</button>
-    <button class="nav-tab" onclick="switchTab(this,'landing_page')">Landing</button>
-    <button class="nav-tab" onclick="switchTab(this,'logo')">Logo</button>
-    <button class="nav-tab" onclick="switchTab(this,'illustration')">Illustration</button>
-    <button class="nav-tab" onclick="switchTab(this,'social_media')">Social</button>
-    <button class="nav-tab" onclick="switchTab(this,'practice')">Practice</button>
-  </nav>
-  <div class="header-actions">
-    <button class="btn-ghost" onclick="clearSession()">↺ Reset</button>
-    <button class="btn-primary" onclick="newSession()">+ New Session</button>
+  <!-- ZOOM OVERLAY -->
+  <div class="zoom-overlay" id="zoomOverlay" style="display:none;" onclick="closeZoom()">
+    <button class="zoom-close" onclick="closeZoom()">✕</button>
+    <img id="zoomImg" src="" alt="">
   </div>
-</header>
 
-<!-- MAIN -->
-<main>
-  <!-- LEFT SIDEBAR -->
-  <aside class="sidebar">
-    <div class="sidebar-top">
-      <div class="section-label">Platform</div>
-      <div class="platform-grid">
-        <button class="platform-btn active" onclick="setPlatform(this,'mobile')" title="Mobile">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><circle cx="12" cy="18" r="1"/></svg>
-          Mobile
-        </button>
-        <button class="platform-btn" onclick="setPlatform(this,'web')" title="Web">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
-          Web
-        </button>
-        <button class="platform-btn" onclick="setPlatform(this,'tablet')" title="Tablet">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="2" width="16" height="20" rx="2"/><circle cx="12" cy="18" r="1"/></svg>
-          Tablet
-        </button>
-      </div>
+  <!-- HEADER -->
+  <header>
+    <a href="#" class="logo">
+      <span class="logo-mark">◈</span>
+      Morph<em>ic</em>
+    </a>
+    <nav>
+      <button class="nav-tab active" onclick="switchTab(this,'ui')">UI Flow</button>
+      <button class="nav-tab" onclick="switchTab(this,'landing_page')">Landing</button>
+      <button class="nav-tab" onclick="switchTab(this,'logo')">Logo</button>
+      <button class="nav-tab" onclick="switchTab(this,'illustration')">Illustration</button>
+      <button class="nav-tab" onclick="switchTab(this,'social_media')">Social</button>
+      <button class="nav-tab" onclick="switchTab(this,'practice')">Practice</button>
+    </nav>
+    <div class="header-actions">
+      <button class="btn-ghost" onclick="clearSession()">↺ Reset</button>
+      <button class="btn-primary" onclick="newSession()">+ New Session</button>
     </div>
+  </header>
 
-    <div class="mode-list" id="modeList">
-      <!-- Modes injected by JS -->
-    </div>
-
-    <hr class="divider">
-
-    <div class="history-panel">
-      <div class="history-label">Recent</div>
-      <div id="historyList">
-        <div class="history-item" onclick="loadHistoryItem(0)">
-          <span class="history-dot" style="background:var(--accent)"></span>
-          <span>E-commerce mobile app</span>
-        </div>
-        <div class="history-item" onclick="loadHistoryItem(1)">
-          <span class="history-dot" style="background:var(--accent2)"></span>
-          <span>Finance dashboard web</span>
-        </div>
-        <div class="history-item" onclick="loadHistoryItem(2)">
-          <span class="history-dot" style="background:var(--accent3)"></span>
-          <span>Social media logo</span>
-        </div>
-      </div>
-    </div>
-  </aside>
-
-  <!-- CENTER WORKSPACE -->
-  <div class="workspace">
-    <div class="canvas-area" id="canvasArea">
-      <!-- Welcome -->
-      <div class="welcome" id="welcomeState">
-        <div class="welcome-orb"><div class="welcome-orb-inner">◈</div></div>
-        <h1>Generate <span>stunning</span> UI designs<br>with a single prompt</h1>
-        <p>Describe your app, choose a platform, and watch Morphic build your entire design system — screens, components, and flows.</p>
-        <div class="quick-prompts">
-          <button class="quick-chip" onclick="useQuickPrompt('A fintech mobile app for tracking investments and portfolios')">💰 Fintech app</button>
-          <button class="quick-chip" onclick="useQuickPrompt('Social media platform mobile app with stories and reels')">📱 Social app</button>
-          <button class="quick-chip" onclick="useQuickPrompt('SaaS analytics dashboard for e-commerce businesses')">📊 Analytics SaaS</button>
-          <button class="quick-chip" onclick="useQuickPrompt('Health & fitness tracking mobile app with meal plans')">🏃 Fitness app</button>
-          <button class="quick-chip" onclick="useQuickPrompt('Travel booking web platform with hotels and flights')">✈️ Travel platform</button>
-          <button class="quick-chip" onclick="useQuickPrompt('Minimal logo for a modern AI startup called Nexus')">✦ AI startup logo</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- INPUT AREA -->
-    <div class="input-area">
-      <div class="reference-strip" id="referenceStrip" style="display:none;"></div>
-      <div class="input-row">
-        <textarea
-          class="input-box"
-          id="mainInput"
-          placeholder="Describe your design… e.g. 'A fintech mobile app for crypto trading with dark theme'"
-          rows="1"
-          onkeydown="handleKey(event)"
-          oninput="autoResize(this)"
-        ></textarea>
-        <div class="input-controls">
-          <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Generate (Enter)">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+  <!-- MAIN -->
+  <main>
+    <!-- LEFT SIDEBAR -->
+    <aside class="sidebar">
+      <div class="sidebar-top">
+        <div class="section-label">Platform</div>
+        <div class="platform-grid">
+          <button class="platform-btn active" onclick="setPlatform(this,'mobile')" title="Mobile">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="5" y="2" width="14" height="20" rx="2" />
+              <circle cx="12" cy="18" r="1" />
+            </svg>
+            Mobile
           </button>
-          <label class="upload-btn" title="Upload reference image">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-            <input type="file" id="fileInput" accept="image/*" onchange="handleFileUpload(event)" style="display:none;">
-          </label>
+          <button class="platform-btn" onclick="setPlatform(this,'web')" title="Web">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="2" y="3" width="20" height="14" rx="2" />
+              <path d="M8 21h8M12 17v4" />
+            </svg>
+            Web
+          </button>
+          <button class="platform-btn" onclick="setPlatform(this,'tablet')" title="Tablet">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="4" y="2" width="16" height="20" rx="2" />
+              <circle cx="12" cy="18" r="1" />
+            </svg>
+            Tablet
+          </button>
         </div>
       </div>
-      <div class="input-hint">
-        <span class="hint-tag">↵ Send</span>
-        <span class="hint-tag">⇧↵ New line</span>
-        <span id="modeHint">Mode: <strong>UI Flow</strong></span>
-        <span id="platformHint" style="margin-left:auto;">📱 Mobile</span>
+
+      <div class="mode-list" id="modeList">
+        <!-- Modes injected by JS -->
+      </div>
+
+      <hr class="divider">
+
+      <div class="history-panel">
+        <div class="history-label">Recent</div>
+        <div id="historyList">
+          <div class="history-item" onclick="loadHistoryItem(0)">
+            <span class="history-dot" style="background:var(--accent)"></span>
+            <span>E-commerce mobile app</span>
+          </div>
+          <div class="history-item" onclick="loadHistoryItem(1)">
+            <span class="history-dot" style="background:var(--accent2)"></span>
+            <span>Finance dashboard web</span>
+          </div>
+          <div class="history-item" onclick="loadHistoryItem(2)">
+            <span class="history-dot" style="background:var(--accent3)"></span>
+            <span>Social media logo</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- CENTER WORKSPACE -->
+    <div class="workspace">
+      <div class="canvas-area" id="canvasArea">
+        <!-- Welcome -->
+        <div class="welcome" id="welcomeState">
+          <div class="welcome-orb">
+            <div class="welcome-orb-inner">◈</div>
+          </div>
+          <h1>Generate <span>stunning</span> UI designs<br>with a single prompt</h1>
+          <p>Describe your app, choose a platform, and watch Morphic build your entire design system — screens,
+            components, and flows.</p>
+          <div class="quick-prompts">
+            <button class="quick-chip"
+              onclick="useQuickPrompt('A fintech mobile app for tracking investments and portfolios')">💰 Fintech
+              app</button>
+            <button class="quick-chip"
+              onclick="useQuickPrompt('Social media platform mobile app with stories and reels')">📱 Social app</button>
+            <button class="quick-chip" onclick="useQuickPrompt('SaaS analytics dashboard for e-commerce businesses')">📊
+              Analytics SaaS</button>
+            <button class="quick-chip"
+              onclick="useQuickPrompt('Health & fitness tracking mobile app with meal plans')">🏃 Fitness app</button>
+            <button class="quick-chip"
+              onclick="useQuickPrompt('Travel booking web platform with hotels and flights')">✈️ Travel
+              platform</button>
+            <button class="quick-chip" onclick="useQuickPrompt('Minimal logo for a modern AI startup called Nexus')">✦
+              AI startup logo</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- INPUT AREA -->
+      <div class="input-area">
+        <div class="reference-strip" id="referenceStrip" style="display:none;"></div>
+        <div class="input-row">
+          <textarea class="input-box" id="mainInput"
+            placeholder="Describe your design… e.g. 'A fintech mobile app for crypto trading with dark theme'" rows="1"
+            onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+          <div class="input-controls">
+            <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Generate (Enter)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+              </svg>
+            </button>
+            <label class="upload-btn" title="Upload reference image">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+              <input type="file" id="fileInput" accept="image/*" onchange="handleFileUpload(event)"
+                style="display:none;">
+            </label>
+          </div>
+        </div>
+        <div class="input-hint">
+          <span class="hint-tag">↵ Send</span>
+          <span class="hint-tag">⇧↵ New line</span>
+          <span id="modeHint">Mode: <strong>UI Flow</strong></span>
+          <span id="platformHint" style="margin-left:auto;">📱 Mobile</span>
+        </div>
       </div>
     </div>
-  </div>
 
-  <!-- RIGHT PANEL -->
-  <div class="right-panel">
-    <div class="panel-section">
-      <div class="section-label">Connection</div>
-      <div class="conn-status">
-        <div class="conn-dot" id="connDot"></div>
-        <span id="connLabel">Disconnected</span>
+    <!-- RIGHT PANEL -->
+    <div class="right-panel">
+      <div class="panel-section">
+        <div class="section-label">Connection</div>
+        <div class="conn-status">
+          <div class="conn-dot" id="connDot"></div>
+          <span id="connLabel">Disconnected</span>
+        </div>
+        <div class="ws-url" id="wsUrlDisplay">—</div>
       </div>
-      <div class="ws-url" id="wsUrlDisplay">—</div>
-    </div>
 
-    <div class="panel-section">
-      <div class="section-label">Server</div>
-      <input
-        type="text"
-        class="config-input"
-        id="serverInput"
-        value="ws://localhost:8001"
-        placeholder="ws://localhost:8001"
-        onchange="updateServer(this.value)"
-      >
-    </div>
-
-    <div class="panel-section">
-      <div class="section-label">Session</div>
-      <div class="session-info" id="sessionInfo">
-        <div><span class="session-key">id: </span><span class="session-val" id="sessionId">—</span></div>
-        <div><span class="session-key">mode: </span><span class="session-val" id="sessionMode">—</span></div>
-        <div><span class="session-key">platform: </span><span class="session-val" id="sessionPlatform">—</span></div>
-        <div><span class="session-key">screens: </span><span class="session-val" id="sessionScreens">—</span></div>
-        <div><span class="session-key">anchor: </span><span class="session-val" id="sessionAnchor">—</span></div>
+      <div class="panel-section">
+        <div class="section-label">Server</div>
+        <input type="text" class="config-input" id="serverInput" value="ws://localhost:8001"
+          placeholder="ws://localhost:8001" onchange="updateServer(this.value)">
       </div>
-    </div>
 
-    <div class="section-label" style="padding: 12px 16px 0;">Events</div>
-    <div class="events-log" id="eventsLog">
-      <div class="events-empty">
-        <span style="font-size:24px;">⏳</span>
-        No events yet.<br>Start generating.
+      <div class="panel-section">
+        <div class="section-label">Session</div>
+        <div class="session-info" id="sessionInfo">
+          <div><span class="session-key">id: </span><span class="session-val" id="sessionId">—</span></div>
+          <div><span class="session-key">mode: </span><span class="session-val" id="sessionMode">—</span></div>
+          <div><span class="session-key">platform: </span><span class="session-val" id="sessionPlatform">—</span></div>
+          <div><span class="session-key">screens: </span><span class="session-val" id="sessionScreens">—</span></div>
+          <div><span class="session-key">anchor: </span><span class="session-val" id="sessionAnchor">—</span></div>
+        </div>
+      </div>
+
+      <div class="section-label" style="padding: 12px 16px 0;">Events</div>
+      <div class="events-log" id="eventsLog">
+        <div class="events-empty">
+          <span style="font-size:24px;">⏳</span>
+          No events yet.<br>Start generating.
+        </div>
       </div>
     </div>
-  </div>
-</main>
+  </main>
 
-<script>
-// ─── STATE ───────────────────────────────────────────────────────────────────
-const state = {
-  mode: 'ui',
-  platform: 'mobile',
-  sessionId: null,
-  serverBase: 'ws://localhost:8001',
-  wsUrl: null,
-  ws: null,
-  generating: false,
-  refImageB64: null,
-  pendingAnchor: null,   // { image_b64, screen, filename, remaining_screens }
-  flowGraph: null,
-  styleGuideB64: null,
-  eventCount: 0,
-};
+  <script>
+    // ─── STATE ───────────────────────────────────────────────────────────────────
+    const state = {
+      mode: 'ui',
+      platform: 'mobile',
+      sessionId: null,
+      serverBase: 'ws://localhost:8001',
+      wsUrl: null,
+      ws: null,
+      generating: false,
+      refImageB64: null,
+      pendingAnchor: null,   // { image_b64, screen, filename, remaining_screens }
+      flowGraph: null,
+      styleGuideB64: null,
+      eventCount: 0,
+    };
 
-const MODES = [
-  { id:'ui',            icon:'🖥️',  label:'UI Flow',      desc:'Multi-screen design flows',     badge:'FLOW',   endpoint:'/ws/ui' },
-  { id:'landing_page',  icon:'🏁',   label:'Landing Page', desc:'Split-artboard landing prototypes', badge:'LAND', endpoint:'/ws/landing_page' },
-  { id:'logo',          icon:'✦',   label:'Logo',          desc:'Brand identity & logo design',  badge:'BRAND',  endpoint:'/ws/logo' },
-  { id:'illustration',  icon:'🎨',  label:'Illustration',  desc:'Custom visual illustrations',   badge:'ART',    endpoint:'/ws/illustration' },
-  { id:'social_media',  icon:'📲',  label:'Social Media',  desc:'Posts for Instagram, Twitter',  badge:'POST',   endpoint:'/ws/social_media' },
-  { id:'practice',      icon:'⚡',  label:'Practice',      desc:'Auto-detect & generate',        badge:'AUTO',   endpoint:'/ws/practice' },
-];
+    const MODES = [
+      { id: 'ui', icon: '🖥️', label: 'UI Flow', desc: 'Multi-screen design flows', badge: 'FLOW', endpoint: '/ws/ui' },
+      { id: 'landing_page', icon: '🏁', label: 'Landing Page', desc: 'Split-artboard landing prototypes', badge: 'LAND', endpoint: '/ws/landing_page' },
+      { id: 'logo', icon: '✦', label: 'Logo', desc: 'Brand identity & logo design', badge: 'BRAND', endpoint: '/ws/logo' },
+      { id: 'illustration', icon: '🎨', label: 'Illustration', desc: 'Custom visual illustrations', badge: 'ART', endpoint: '/ws/illustration' },
+      { id: 'social_media', icon: '📲', label: 'Social Media', desc: 'Posts for Instagram, Twitter', badge: 'POST', endpoint: '/ws/social_media' },
+      { id: 'practice', icon: '⚡', label: 'Practice', desc: 'Auto-detect & generate', badge: 'AUTO', endpoint: '/ws/practice' },
+    ];
 
-// ─── INIT ─────────────────────────────────────────────────────────────────────
-window.onload = () => {
-  state.sessionId = generateId();
-  updateSessionDisplay();
-  renderModeList();
-  updateHints();
-  window.addEventListener('resize', () => requestAnimationFrame(renderFlowConnections));
-};
+    // ─── INIT ─────────────────────────────────────────────────────────────────────
+    window.onload = () => {
+      state.sessionId = generateId();
+      updateSessionDisplay();
+      renderModeList();
+      updateHints();
+      window.addEventListener('resize', () => requestAnimationFrame(renderFlowConnections));
+    };
 
-function generateId() {
-  return 'sess-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,6);
-}
+    function generateId() {
+      return 'sess-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+    }
 
-function renderModeList() {
-  const el = document.getElementById('modeList');
-  el.innerHTML = MODES.map(m => `
+    function renderModeList() {
+      const el = document.getElementById('modeList');
+      el.innerHTML = MODES.map(m => `
     <div class="mode-item ${m.id === state.mode ? 'active' : ''}" onclick="setMode('${m.id}')">
       <div class="mode-icon">${m.icon}</div>
       <div class="mode-meta">
@@ -1282,79 +1690,79 @@ function renderModeList() {
       <span class="mode-badge">${m.badge}</span>
     </div>
   `).join('');
-}
+    }
 
-// ─── MODE & PLATFORM ─────────────────────────────────────────────────────────
-function setMode(id) {
-  state.mode = id;
-  if (id === 'landing_page') {
-    state.platform = 'web';
-    syncPlatformSelection('web');
-  }
-  renderModeList();
-  updateHints();
-  switchTab(document.querySelector(`.nav-tab[onclick*="${id}"]`), id);
-}
+    // ─── MODE & PLATFORM ─────────────────────────────────────────────────────────
+    function setMode(id) {
+      state.mode = id;
+      if (id === 'landing_page') {
+        state.platform = 'web';
+        syncPlatformSelection('web');
+      }
+      renderModeList();
+      updateHints();
+      switchTab(document.querySelector(`.nav-tab[onclick*="${id}"]`), id);
+    }
 
-function switchTab(btn, mode) {
-  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-  if (btn) btn.classList.add('active');
-  setMode(mode);
-}
+    function switchTab(btn, mode) {
+      document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      setMode(mode);
+    }
 
-function setPlatform(btn, p) {
-  syncPlatformSelection(p);
-  state.platform = p;
-  updateHints();
-}
+    function setPlatform(btn, p) {
+      syncPlatformSelection(p);
+      state.platform = p;
+      updateHints();
+    }
 
-function syncPlatformSelection(platform) {
-  document.querySelectorAll('.platform-btn').forEach(b => b.classList.remove('active'));
-  const title = { mobile: 'Mobile', web: 'Web', tablet: 'Tablet' }[platform] || 'Web';
-  const button = Array.from(document.querySelectorAll('.platform-btn')).find(b => b.title === title);
-  if (button) button.classList.add('active');
-}
+    function syncPlatformSelection(platform) {
+      document.querySelectorAll('.platform-btn').forEach(b => b.classList.remove('active'));
+      const title = { mobile: 'Mobile', web: 'Web', tablet: 'Tablet' }[platform] || 'Web';
+      const button = Array.from(document.querySelectorAll('.platform-btn')).find(b => b.title === title);
+      if (button) button.classList.add('active');
+    }
 
-function updateHints() {
-  const m = MODES.find(m => m.id === state.mode);
-  document.getElementById('modeHint').innerHTML = `Mode: <strong>${m?.label || 'UI Flow'}</strong>`;
-  const icons = { mobile:'📱', web:'🖥️', tablet:'📟' };
-  document.getElementById('platformHint').textContent = `${icons[state.platform]||'🖥️'} ${state.platform.charAt(0).toUpperCase()+state.platform.slice(1)}`;
-}
+    function updateHints() {
+      const m = MODES.find(m => m.id === state.mode);
+      document.getElementById('modeHint').innerHTML = `Mode: <strong>${m?.label || 'UI Flow'}</strong>`;
+      const icons = { mobile: '📱', web: '🖥️', tablet: '📟' };
+      document.getElementById('platformHint').textContent = `${icons[state.platform] || '🖥️'} ${state.platform.charAt(0).toUpperCase() + state.platform.slice(1)}`;
+    }
 
-function updateServer(val) {
-  state.serverBase = val.replace(/\/$/, '');
-}
+    function updateServer(val) {
+      state.serverBase = val.replace(/\/$/, '');
+    }
 
-// ─── SESSION ─────────────────────────────────────────────────────────────────
-function updateSessionDisplay() {
-  document.getElementById('sessionId').textContent = state.sessionId?.slice(-8) || '—';
-  document.getElementById('sessionMode').textContent = state.mode;
-  document.getElementById('sessionPlatform').textContent = state.platform;
-  document.getElementById('sessionAnchor').textContent = state.pendingAnchor ? '✓ ready' : 'none';
-}
+    // ─── SESSION ─────────────────────────────────────────────────────────────────
+    function updateSessionDisplay() {
+      document.getElementById('sessionId').textContent = state.sessionId?.slice(-8) || '—';
+      document.getElementById('sessionMode').textContent = state.mode;
+      document.getElementById('sessionPlatform').textContent = state.platform;
+      document.getElementById('sessionAnchor').textContent = state.pendingAnchor ? '✓ ready' : 'none';
+    }
 
-function newSession() {
-  if (state.ws) { try { state.ws.close(); } catch(e){} state.ws = null; }
-  state.wsUrl = null;
-  state.sessionId = generateId();
-  state.pendingAnchor = null;
-  state.flowGraph = null;
-  state.styleGuideB64 = null;
-  state.refImageB64 = null;
-  clearCanvas();
-  clearEvents();
-  updateSessionDisplay();
-  setConnStatus('disconnected');
-  showToast('New session started');
-}
+    function newSession() {
+      if (state.ws) { try { state.ws.close(); } catch (e) { } state.ws = null; }
+      state.wsUrl = null;
+      state.sessionId = generateId();
+      state.pendingAnchor = null;
+      state.flowGraph = null;
+      state.styleGuideB64 = null;
+      state.refImageB64 = null;
+      clearCanvas();
+      clearEvents();
+      updateSessionDisplay();
+      setConnStatus('disconnected');
+      showToast('New session started');
+    }
 
-function clearSession() {
-  newSession();
-}
+    function clearSession() {
+      newSession();
+    }
 
-function clearCanvas() {
-  document.getElementById('canvasArea').innerHTML = `
+    function clearCanvas() {
+      document.getElementById('canvasArea').innerHTML = `
     <div class="welcome" id="welcomeState">
       <div class="welcome-orb"><div class="welcome-orb-inner">◈</div></div>
       <h1>Generate <span>stunning</span> UI designs<br>with a single prompt</h1>
@@ -1369,106 +1777,106 @@ function clearCanvas() {
         <button class="quick-chip" onclick="useQuickPrompt('Minimal logo for a modern AI startup called Nexus')">✦ AI startup logo</button>
       </div>
     </div>`;
-}
+    }
 
-function clearEvents() {
-  const log = document.getElementById('eventsLog');
-  log.innerHTML = `<div class="events-empty"><span style="font-size:24px;">⏳</span>No events yet.<br>Start generating.</div>`;
-  state.eventCount = 0;
-}
+    function clearEvents() {
+      const log = document.getElementById('eventsLog');
+      log.innerHTML = `<div class="events-empty"><span style="font-size:24px;">⏳</span>No events yet.<br>Start generating.</div>`;
+      state.eventCount = 0;
+    }
 
-// ─── INPUT ────────────────────────────────────────────────────────────────────
-function handleKey(e) {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    sendMessage();
-  }
-}
+    // ─── INPUT ────────────────────────────────────────────────────────────────────
+    function handleKey(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    }
 
-function autoResize(el) {
-  el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 160) + 'px';
-}
+    function autoResize(el) {
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+    }
 
-function useQuickPrompt(text) {
-  const input = document.getElementById('mainInput');
-  input.value = text;
-  autoResize(input);
-  input.focus();
-}
+    function useQuickPrompt(text) {
+      const input = document.getElementById('mainInput');
+      input.value = text;
+      autoResize(input);
+      input.focus();
+    }
 
-function loadHistoryItem(idx) {
-  const prompts = [
-    'A fintech mobile app for crypto portfolio tracking',
-    'SaaS analytics dashboard for e-commerce businesses',
-    'Minimal elegant logo for a social media startup'
-  ];
-  useQuickPrompt(prompts[idx] || '');
-}
+    function loadHistoryItem(idx) {
+      const prompts = [
+        'A fintech mobile app for crypto portfolio tracking',
+        'SaaS analytics dashboard for e-commerce businesses',
+        'Minimal elegant logo for a social media startup'
+      ];
+      useQuickPrompt(prompts[idx] || '');
+    }
 
-// ─── FILE UPLOAD ──────────────────────────────────────────────────────────────
-function handleFileUpload(e) {
-  const file = e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = ev => {
-    const b64 = ev.target.result.split(',')[1];
-    state.refImageB64 = b64;
-    showReferenceStrip(ev.target.result, file.name);
-  };
-  reader.readAsDataURL(file);
-}
+    // ─── FILE UPLOAD ──────────────────────────────────────────────────────────────
+    function handleFileUpload(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = ev => {
+        const b64 = ev.target.result.split(',')[1];
+        state.refImageB64 = b64;
+        showReferenceStrip(ev.target.result, file.name);
+      };
+      reader.readAsDataURL(file);
+    }
 
-function showReferenceStrip(dataUrl, name) {
-  const strip = document.getElementById('referenceStrip');
-  strip.style.display = 'flex';
-  strip.innerHTML = `
+    function showReferenceStrip(dataUrl, name) {
+      const strip = document.getElementById('referenceStrip');
+      strip.style.display = 'flex';
+      strip.innerHTML = `
     <img class="ref-thumb" src="${dataUrl}" alt="ref" onclick="openZoom('${dataUrl}')">
     <span class="ref-label">📎 ${name}</span>
     <button class="ref-remove" onclick="removeRef()">✕</button>
   `;
-}
+    }
 
-function removeRef() {
-  state.refImageB64 = null;
-  const strip = document.getElementById('referenceStrip');
-  strip.style.display = 'none';
-  strip.innerHTML = '';
-  document.getElementById('fileInput').value = '';
-}
+    function removeRef() {
+      state.refImageB64 = null;
+      const strip = document.getElementById('referenceStrip');
+      strip.style.display = 'none';
+      strip.innerHTML = '';
+      document.getElementById('fileInput').value = '';
+    }
 
-// ─── CONNECTION STATUS ────────────────────────────────────────────────────────
-function setConnStatus(status, url='') {
-  const dot = document.getElementById('connDot');
-  const lbl = document.getElementById('connLabel');
-  const urlEl = document.getElementById('wsUrlDisplay');
-  dot.className = 'conn-dot ' + status;
-  lbl.textContent = { connected:'Connected', connecting:'Connecting…', disconnected:'Disconnected', error:'Error' }[status] || status;
-  if (url) urlEl.innerHTML = `<strong>${url.split('/').pop()}</strong>`;
-  else urlEl.innerHTML = '—';
-}
+    // ─── CONNECTION STATUS ────────────────────────────────────────────────────────
+    function setConnStatus(status, url = '') {
+      const dot = document.getElementById('connDot');
+      const lbl = document.getElementById('connLabel');
+      const urlEl = document.getElementById('wsUrlDisplay');
+      dot.className = 'conn-dot ' + status;
+      lbl.textContent = { connected: 'Connected', connecting: 'Connecting…', disconnected: 'Disconnected', error: 'Error' }[status] || status;
+      if (url) urlEl.innerHTML = `<strong>${url.split('/').pop()}</strong>`;
+      else urlEl.innerHTML = '—';
+    }
 
-// ─── EVENTS LOG ──────────────────────────────────────────────────────────────
-const EVENT_ICONS = {
-  status:'⚙️', style_guide:'🎨', anchor_preview:'⚓', screen:'🖼️',
-  landing_page:'🏁', logo:'✦', illustration:'🖌️', social_media:'📲', assistant_message:'💬',
-  done:'✅', error:'❌', intent:'🔍'
-};
+    // ─── EVENTS LOG ──────────────────────────────────────────────────────────────
+    const EVENT_ICONS = {
+      status: '⚙️', style_guide: '🎨', anchor_preview: '⚓', screen: '🖼️',
+      landing_page: '🏁', logo: '✦', illustration: '🖌️', social_media: '📲', assistant_message: '💬',
+      done: '✅', error: '❌', intent: '🔍'
+    };
 
-function logEvent(event, data) {
-  const log = document.getElementById('eventsLog');
-  const empty = log.querySelector('.events-empty');
-  if (empty) empty.remove();
+    function logEvent(event, data) {
+      const log = document.getElementById('eventsLog');
+      const empty = log.querySelector('.events-empty');
+      if (empty) empty.remove();
 
-  state.eventCount++;
-  const ts = new Date().toLocaleTimeString('en', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
-  const icon = EVENT_ICONS[event] || '•';
-  const isErr = event === 'error';
-  const preview = typeof data === 'object' ? (data.message || data.filename || JSON.stringify(data).slice(0,40)+'…') : String(data).slice(0,40);
+      state.eventCount++;
+      const ts = new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const icon = EVENT_ICONS[event] || '•';
+      const isErr = event === 'error';
+      const preview = typeof data === 'object' ? (data.message || data.filename || JSON.stringify(data).slice(0, 40) + '…') : String(data).slice(0, 40);
 
-  const item = document.createElement('div');
-  item.className = `event-item ${isErr ? 'error-ev' : ''}`;
-  item.innerHTML = `
+      const item = document.createElement('div');
+      item.className = `event-item ${isErr ? 'error-ev' : ''}`;
+      item.innerHTML = `
     <span class="event-icon">${icon}</span>
     <div class="event-body">
       <span class="event-name">${event}</span>
@@ -1476,36 +1884,36 @@ function logEvent(event, data) {
     </div>
     <span class="event-ts">${ts}</span>
   `;
-  log.appendChild(item);
-  log.scrollTop = log.scrollHeight;
+      log.appendChild(item);
+      log.scrollTop = log.scrollHeight;
 
-  // Update session info
-  updateSessionDisplay();
-}
+      // Update session info
+      updateSessionDisplay();
+    }
 
-// ─── CANVAS HELPERS ───────────────────────────────────────────────────────────
-function hideWelcome() {
-  const w = document.getElementById('welcomeState');
-  if (w) w.remove();
-}
+    // ─── CANVAS HELPERS ───────────────────────────────────────────────────────────
+    function hideWelcome() {
+      const w = document.getElementById('welcomeState');
+      if (w) w.remove();
+    }
 
-function appendToCanvas(html) {
-  const canvas = document.getElementById('canvasArea');
-  const shell = document.createElement('div');
-  shell.className = 'canvas-item-shell';
-  shell.innerHTML = html;
-  canvas.appendChild(shell);
-  canvas.scrollTop = canvas.scrollHeight;
-}
+    function appendToCanvas(html) {
+      const canvas = document.getElementById('canvasArea');
+      const shell = document.createElement('div');
+      shell.className = 'canvas-item-shell';
+      shell.innerHTML = html;
+      canvas.appendChild(shell);
+      canvas.scrollTop = canvas.scrollHeight;
+    }
 
-function removeProgressIndicator() {
-  const el = document.getElementById('progressIndicator');
-  if (el) el.remove();
-}
+    function removeProgressIndicator() {
+      const el = document.getElementById('progressIndicator');
+      if (el) el.remove();
+    }
 
-function showProgress(msg, sub='') {
-  removeProgressIndicator();
-  const html = `<div class="progress-wrap" id="progressIndicator">
+    function showProgress(msg, sub = '') {
+      removeProgressIndicator();
+      const html = `<div class="progress-wrap" id="progressIndicator">
     <div class="progress-ring">
       <svg class="ring" width="32" height="32" viewBox="0 0 32 32">
         <circle cx="16" cy="16" r="13" fill="none" stroke="var(--border)" stroke-width="2"/>
@@ -1518,31 +1926,31 @@ function showProgress(msg, sub='') {
       ${sub ? `<div class="progress-sub">${sub}</div>` : ''}
     </div>
   </div>`;
-  appendToCanvas(html);
-}
+      appendToCanvas(html);
+    }
 
-function updateProgress(msg) {
-  const el = document.getElementById('progressIndicator');
-  if (el) {
-    const lbl = el.querySelector('.progress-label');
-    if (lbl) lbl.textContent = msg;
-  } else {
-    showProgress(msg);
-  }
-}
+    function updateProgress(msg) {
+      const el = document.getElementById('progressIndicator');
+      if (el) {
+        const lbl = el.querySelector('.progress-label');
+        if (lbl) lbl.textContent = msg;
+      } else {
+        showProgress(msg);
+      }
+    }
 
-// ─── SEND MESSAGE ─────────────────────────────────────────────────────────────
-async function sendMessage() {
-  const input = document.getElementById('mainInput');
-  const query = input.value.trim();
-  if (!query || state.generating) return;
+    // ─── SEND MESSAGE ─────────────────────────────────────────────────────────────
+    async function sendMessage() {
+      const input = document.getElementById('mainInput');
+      const query = input.value.trim();
+      if (!query || state.generating) return;
 
-  hideWelcome();
-  input.value = '';
-  autoResize(input);
+      hideWelcome();
+      input.value = '';
+      autoResize(input);
 
-  // User bubble
-  appendToCanvas(`
+      // User bubble
+      appendToCanvas(`
     <div class="message user">
       <div class="msg-avatar user">U</div>
       <div class="msg-content">
@@ -1551,90 +1959,90 @@ async function sendMessage() {
     </div>
   `);
 
-  const endpoint = MODES.find(m => m.id === state.mode)?.endpoint || '/ws/ui';
-  const wsUrl = state.serverBase + endpoint;
+      const endpoint = MODES.find(m => m.id === state.mode)?.endpoint || '/ws/ui';
+      const wsUrl = state.serverBase + endpoint;
 
-  const payload = {
-    session_id: state.sessionId,
-    query,
-    platform: state.platform,
-    reference_image_b64: state.refImageB64 || null,
-  };
+      const payload = {
+        session_id: state.sessionId,
+        query,
+        platform: state.platform,
+        reference_image_b64: state.refImageB64 || null,
+      };
 
-  state.generating = true;
-  document.getElementById('sendBtn').disabled = true;
+      state.generating = true;
+      document.getElementById('sendBtn').disabled = true;
 
-  connectAndSend(wsUrl, payload);
-}
+      connectAndSend(wsUrl, payload);
+    }
 
-function connectAndSend(wsUrl, payload) {
-  if (state.ws && state.ws.readyState === WebSocket.OPEN && state.wsUrl === wsUrl) {
-    state.ws.send(JSON.stringify(payload));
-    showProgress('Sending request over existing session…');
-    logEvent('send', { url: wsUrl });
-    return;
-  }
-
-  if (state.ws && state.ws.readyState === WebSocket.CONNECTING) {
-    try { state.ws.close(); } catch(e){}
-  }
-
-  setConnStatus('connecting', wsUrl);
-  state.wsUrl = wsUrl;
-  document.getElementById('wsUrlDisplay').innerHTML = `<strong>…/${wsUrl.split('/').pop()}</strong>`;
-
-  try {
-    const ws = new WebSocket(wsUrl);
-    state.ws = ws;
-    state.wsUrl = wsUrl;
-
-    ws.onopen = () => {
-      setConnStatus('connected', wsUrl);
-      ws.send(JSON.stringify(payload));
-      showProgress('Connecting to Morphic backend…');
-      logEvent('connect', { url: wsUrl });
-    };
-
-    ws.onmessage = (evt) => {
-      let data;
-      try { data = JSON.parse(evt.data); } catch(e) { return; }
-      handleServerEvent(data);
-    };
-
-    ws.onerror = () => {
-      setConnStatus('error');
-      removeProgressIndicator();
-      showErrorBanner('WebSocket error — check server connection.');
-      doneGenerating();
-    };
-
-    ws.onclose = () => {
-      if (state.ws === ws) {
-        setConnStatus('disconnected');
-        state.ws = null;
-        state.wsUrl = null;
+    function connectAndSend(wsUrl, payload) {
+      if (state.ws && state.ws.readyState === WebSocket.OPEN && state.wsUrl === wsUrl) {
+        state.ws.send(JSON.stringify(payload));
+        showProgress('Sending request over existing session…');
+        logEvent('send', { url: wsUrl });
+        return;
       }
-    };
-  } catch(e) {
-    setConnStatus('error');
-    showErrorBanner('Cannot connect: ' + e.message);
-    doneGenerating();
-  }
-}
 
-// ─── EVENT HANDLERS ───────────────────────────────────────────────────────────
-function handleServerEvent(data) {
-  const { event } = data;
-  logEvent(event, data);
+      if (state.ws && state.ws.readyState === WebSocket.CONNECTING) {
+        try { state.ws.close(); } catch (e) { }
+      }
 
-  switch(event) {
-    case 'status':
-      updateProgress(data.message || '');
-      break;
+      setConnStatus('connecting', wsUrl);
+      state.wsUrl = wsUrl;
+      document.getElementById('wsUrlDisplay').innerHTML = `<strong>…/${wsUrl.split('/').pop()}</strong>`;
 
-    case 'assistant_message':
-      removeProgressIndicator();
-      appendToCanvas(`
+      try {
+        const ws = new WebSocket(wsUrl);
+        state.ws = ws;
+        state.wsUrl = wsUrl;
+
+        ws.onopen = () => {
+          setConnStatus('connected', wsUrl);
+          ws.send(JSON.stringify(payload));
+          showProgress('Connecting to Morphic backend…');
+          logEvent('connect', { url: wsUrl });
+        };
+
+        ws.onmessage = (evt) => {
+          let data;
+          try { data = JSON.parse(evt.data); } catch (e) { return; }
+          handleServerEvent(data);
+        };
+
+        ws.onerror = () => {
+          setConnStatus('error');
+          removeProgressIndicator();
+          showErrorBanner('WebSocket error — check server connection.');
+          doneGenerating();
+        };
+
+        ws.onclose = () => {
+          if (state.ws === ws) {
+            setConnStatus('disconnected');
+            state.ws = null;
+            state.wsUrl = null;
+          }
+        };
+      } catch (e) {
+        setConnStatus('error');
+        showErrorBanner('Cannot connect: ' + e.message);
+        doneGenerating();
+      }
+    }
+
+    // ─── EVENT HANDLERS ───────────────────────────────────────────────────────────
+    function handleServerEvent(data) {
+      const { event } = data;
+      logEvent(event, data);
+
+      switch (event) {
+        case 'status':
+          updateProgress(data.message || '');
+          break;
+
+        case 'assistant_message':
+          removeProgressIndicator();
+          appendToCanvas(`
         <div class="message ai">
           <div class="msg-avatar ai">◈</div>
           <div class="msg-content">
@@ -1642,11 +2050,11 @@ function handleServerEvent(data) {
           </div>
         </div>
       `);
-      break;
+          break;
 
-    case 'intent':
-      removeProgressIndicator();
-      appendToCanvas(`
+        case 'intent':
+          removeProgressIndicator();
+          appendToCanvas(`
         <div class="message ai">
           <div class="msg-avatar ai">◈</div>
           <div class="msg-content">
@@ -1657,12 +2065,12 @@ function handleServerEvent(data) {
           </div>
         </div>
       `);
-      break;
+          break;
 
-    case 'style_guide':
-      removeProgressIndicator();
-      state.styleGuideB64 = data.image_b64;
-      appendToCanvas(`
+        case 'style_guide':
+          removeProgressIndicator();
+          state.styleGuideB64 = data.image_b64;
+          appendToCanvas(`
         <div class="result-card">
           <div class="result-card-header">
             <div class="result-card-label">
@@ -1671,65 +2079,65 @@ function handleServerEvent(data) {
               <span class="label-badge badge-guide">STYLE GUIDE</span>
             </div>
             <div class="card-actions">
-              <button class="card-btn" onclick="downloadImage('${data.image_b64}','${data.filename||'style_guide.png'}')">⬇ Save</button>
+              <button class="card-btn" onclick="downloadImage('${data.image_b64}','${data.filename || 'style_guide.png'}')">⬇ Save</button>
               <button class="card-btn" onclick="openZoom('data:image/png;base64,${data.image_b64}')">⤢ Expand</button>
             </div>
           </div>
           <img class="result-img" src="data:image/png;base64,${data.image_b64}" alt="Style Guide" onclick="openZoom('data:image/png;base64,${data.image_b64}')" style="cursor:zoom-in;">
         </div>
       `);
-      break;
+          break;
 
-    case 'anchor_preview': {
-      removeProgressIndicator();
-      state.pendingAnchor = data;
-      state.flowGraph = data.screen_graph || buildFallbackFlowGraph(data.screen || 'Anchor', data.remaining_screens || []);
-      state.pendingAnchor.totalScreens = (state.flowGraph?.nodes?.length || (data.remaining_screens || []).length + 1);
-      updateSessionDisplay();
-      const remaining = data.remaining_screens || [];
-      appendToCanvas(`
+        case 'anchor_preview': {
+          removeProgressIndicator();
+          state.pendingAnchor = data;
+          state.flowGraph = data.screen_graph || buildFallbackFlowGraph(data.screen || 'Anchor', data.remaining_screens || []);
+          state.pendingAnchor.totalScreens = (state.flowGraph?.nodes?.length || (data.remaining_screens || []).length + 1);
+          updateSessionDisplay();
+          const remaining = data.remaining_screens || [];
+          appendToCanvas(`
         <div class="result-card anchor-preview" id="anchorCard">
           <div class="result-card-header">
             <div class="result-card-label">
-              ⚓ Anchor Screen — <strong>${escHtml(data.screen||'')}</strong>
+              ⚓ Anchor Screen — <strong>${escHtml(data.screen || '')}</strong>
               <span class="label-badge badge-anchor">ANCHOR</span>
             </div>
             <div class="card-actions">
-              <button class="card-btn" onclick="downloadImage('${data.image_b64}','${data.filename||'anchor.png'}')">⬇ Save</button>
+              <button class="card-btn" onclick="downloadImage('${data.image_b64}','${data.filename || 'anchor.png'}')">⬇ Save</button>
               <button class="card-btn" onclick="openZoom('data:image/png;base64,${data.image_b64}')">⤢ Expand</button>
               <button class="card-btn approve" onclick="approveAnchor()">✓ Approve</button>
               <button class="card-btn" onclick="reviseAnchor()">✎ Revise</button>
             </div>
           </div>
-          <img class="result-img" src="data:image/png;base64,${data.image_b64}" alt="${escHtml(data.screen||'')}" onclick="openZoom('data:image/png;base64,${data.image_b64}')" style="cursor:zoom-in;">
+          <img class="result-img" src="data:image/png;base64,${data.image_b64}" alt="${escHtml(data.screen || '')}" onclick="openZoom('data:image/png;base64,${data.image_b64}')" style="cursor:zoom-in;">
           <div class="anchor-actions">
             <div class="anchor-info">
-              <strong>⚓ Anchor ready.</strong> Approve this design to generate ${remaining.length} remaining screen${remaining.length!==1?'s':''}: <em>${remaining.join(', ')}</em>
+              <strong>⚓ Anchor ready.</strong> Approve this design to generate ${remaining.length} remaining screen${remaining.length !== 1 ? 's' : ''}: <em>${remaining.join(', ')}</em>
             </div>
             <button class="card-btn approve" onclick="approveAnchor()">✓ Approve</button>
             <button class="card-btn" onclick="reviseAnchor()">✎ Revise</button>
           </div>
         </div>
       `);
-      ensureScreensGallery(state.pendingAnchor.totalScreens);
-      appendGalleryThumb({
-        image_b64: data.image_b64,
-        name: data.screen || 'Anchor',
-        filename: data.filename || 'anchor.png',
-        index: 1,
-        total: state.pendingAnchor.totalScreens,
-        isAnchor: true,
-        nodeId: data.node_id || '',
-      });
-      scheduleFlowRender();
-      break;
-    }
+          ensureScreensGallery(state.pendingAnchor.totalScreens);
+          appendGalleryThumb({
+            image_b64: data.image_b64,
+            name: data.screen || 'Anchor',
+            filename: data.filename || 'anchor.png',
+            index: 1,
+            total: state.pendingAnchor.totalScreens,
+            isAnchor: true,
+            nodeId: data.node_id || '',
+          });
+          scheduleFlowRender();
+          break;
+        }
 
-    case 'screen':
-      removeProgressIndicator();
-      state.generatedCount = (state.generatedCount || 0) + 1;
-      if (data.screen_graph) state.flowGraph = data.screen_graph;
-      appendToCanvas(`
+        case 'screen':
+          removeProgressIndicator();
+          state.generatedCount = (state.generatedCount || 0) + 1;
+          if (data.screen_graph) state.flowGraph = data.screen_graph;
+          appendToCanvas(`
         <div class="message ai">
           <div class="msg-avatar ai">◈</div>
           <div class="msg-content">
@@ -1737,13 +2145,13 @@ function handleServerEvent(data) {
           </div>
         </div>
       `);
-      renderScreen(data);
-      scheduleFlowRender();
-      break;
+          renderScreen(data);
+          scheduleFlowRender();
+          break;
 
-    case 'landing_page':
-      removeProgressIndicator();
-      appendToCanvas(`
+        case 'landing_page':
+          removeProgressIndicator();
+          appendToCanvas(`
         <div class="result-card landing-preview">
           <div class="result-card-header">
             <div class="result-card-label">
@@ -1751,19 +2159,19 @@ function handleServerEvent(data) {
               <span class="label-badge badge-guide">SPLIT ARTBOARDS</span>
             </div>
             <div class="card-actions">
-              <button class="card-btn" onclick="downloadImage('${data.image_b64}','${data.filename||'landing_page_prototype.png'}')">⬇ Save</button>
+              <button class="card-btn" onclick="downloadImage('${data.image_b64}','${data.filename || 'landing_page_prototype.png'}')">⬇ Save</button>
               <button class="card-btn" onclick="openZoom('data:image/png;base64,${data.image_b64}')">⤢ Expand</button>
-              <button class="card-btn" onclick="setAsReference('${data.image_b64}','${data.filename||'landing_page_prototype.png'}')">↩ Use as Ref</button>
+              <button class="card-btn" onclick="setAsReference('${data.image_b64}','${data.filename || 'landing_page_prototype.png'}')">↩ Use as Ref</button>
             </div>
           </div>
           <img class="result-img" src="data:image/png;base64,${data.image_b64}" alt="Landing Page Prototype" onclick="openZoom('data:image/png;base64,${data.image_b64}')" style="cursor:zoom-in;">
         </div>
       `);
-      break;
+          break;
 
-    case 'logo':
-      removeProgressIndicator();
-      appendToCanvas(`
+        case 'logo':
+          removeProgressIndicator();
+          appendToCanvas(`
         <div class="result-card">
           <div class="result-card-header">
             <div class="result-card-label">
@@ -1771,19 +2179,19 @@ function handleServerEvent(data) {
               <span class="label-badge badge-logo">${data.is_edit ? 'REVISED' : 'NEW'}</span>
             </div>
             <div class="card-actions">
-              <button class="card-btn" onclick="downloadImage('${data.image_b64}','${data.filename||'logo.png'}')">⬇ Save</button>
+              <button class="card-btn" onclick="downloadImage('${data.image_b64}','${data.filename || 'logo.png'}')">⬇ Save</button>
               <button class="card-btn" onclick="openZoom('data:image/png;base64,${data.image_b64}')">⤢ Expand</button>
-              <button class="card-btn" onclick="setAsReference('${data.image_b64}','${data.filename||'logo.png'}')">↩ Use as Ref</button>
+              <button class="card-btn" onclick="setAsReference('${data.image_b64}','${data.filename || 'logo.png'}')">↩ Use as Ref</button>
             </div>
           </div>
           <img class="result-img" src="data:image/png;base64,${data.image_b64}" alt="Logo" onclick="openZoom('data:image/png;base64,${data.image_b64}')" style="cursor:zoom-in;">
         </div>
       `);
-      break;
+          break;
 
-    case 'illustration':
-      removeProgressIndicator();
-      appendToCanvas(`
+        case 'illustration':
+          removeProgressIndicator();
+          appendToCanvas(`
         <div class="result-card">
           <div class="result-card-header">
             <div class="result-card-label">
@@ -1791,19 +2199,19 @@ function handleServerEvent(data) {
               <span class="label-badge badge-logo">${data.is_edit ? 'REVISED' : 'NEW'}</span>
             </div>
             <div class="card-actions">
-              <button class="card-btn" onclick="downloadImage('${data.image_b64}','${data.filename||'illustration.png'}')">⬇ Save</button>
+              <button class="card-btn" onclick="downloadImage('${data.image_b64}','${data.filename || 'illustration.png'}')">⬇ Save</button>
               <button class="card-btn" onclick="openZoom('data:image/png;base64,${data.image_b64}')">⤢ Expand</button>
-              <button class="card-btn" onclick="setAsReference('${data.image_b64}','${data.filename||'illust.png'}')">↩ Use as Ref</button>
+              <button class="card-btn" onclick="setAsReference('${data.image_b64}','${data.filename || 'illust.png'}')">↩ Use as Ref</button>
             </div>
           </div>
           <img class="result-img" src="data:image/png;base64,${data.image_b64}" alt="Illustration" onclick="openZoom('data:image/png;base64,${data.image_b64}')" style="cursor:zoom-in;">
         </div>
       `);
-      break;
+          break;
 
-    case 'social_media':
-      removeProgressIndicator();
-      appendToCanvas(`
+        case 'social_media':
+          removeProgressIndicator();
+          appendToCanvas(`
         <div class="result-card">
           <div class="result-card-header">
             <div class="result-card-label">
@@ -1811,54 +2219,54 @@ function handleServerEvent(data) {
               <span class="label-badge badge-social">${data.is_edit ? 'REVISED' : 'NEW'}</span>
             </div>
             <div class="card-actions">
-              <button class="card-btn" onclick="downloadImage('${data.image_b64}','${data.filename||'social.png'}')">⬇ Save</button>
+              <button class="card-btn" onclick="downloadImage('${data.image_b64}','${data.filename || 'social.png'}')">⬇ Save</button>
               <button class="card-btn" onclick="openZoom('data:image/png;base64,${data.image_b64}')">⤢ Expand</button>
-              <button class="card-btn" onclick="setAsReference('${data.image_b64}','${data.filename||'social.png'}')">↩ Use as Ref</button>
+              <button class="card-btn" onclick="setAsReference('${data.image_b64}','${data.filename || 'social.png'}')">↩ Use as Ref</button>
             </div>
           </div>
           <img class="result-img" src="data:image/png;base64,${data.image_b64}" alt="Social Media" onclick="openZoom('data:image/png;base64,${data.image_b64}')" style="cursor:zoom-in;">
         </div>
       `);
-      break;
+          break;
 
-    case 'error':
-      removeProgressIndicator();
-      showErrorBanner(data.message || 'An error occurred.');
-      doneGenerating();
-      break;
+        case 'error':
+          removeProgressIndicator();
+          showErrorBanner(data.message || 'An error occurred.');
+          doneGenerating();
+          break;
 
-    case 'done':
-      removeProgressIndicator();
-      doneGenerating();
-      break;
-  }
+        case 'done':
+          removeProgressIndicator();
+          doneGenerating();
+          break;
+      }
 
-  // Auto-scroll
-  const canvas = document.getElementById('canvasArea');
-  canvas.scrollTop = canvas.scrollHeight;
-}
+      // Auto-scroll
+      const canvas = document.getElementById('canvasArea');
+      canvas.scrollTop = canvas.scrollHeight;
+    }
 
-// ─── SCREEN RENDERING ─────────────────────────────────────────────────────────
-let _screenBuffer = [];
-let _screenContainerId = null;
+    // ─── SCREEN RENDERING ─────────────────────────────────────────────────────────
+    let _screenBuffer = [];
+    let _screenContainerId = null;
 
-function renderScreen(data) {
-  ensureScreensGallery(state.pendingAnchor?.totalScreens || 0);
-  appendGalleryThumb({
-    image_b64: data.image_b64,
-    name: data.name || 'Screen',
-    filename: data.filename || 'screen.png',
-    index: data.index,
-    total: state.pendingAnchor?.totalScreens || 0,
-    nodeId: data.node_id || '',
-  });
-}
+    function renderScreen(data) {
+      ensureScreensGallery(state.pendingAnchor?.totalScreens || 0);
+      appendGalleryThumb({
+        image_b64: data.image_b64,
+        name: data.name || 'Screen',
+        filename: data.filename || 'screen.png',
+        index: data.index,
+        total: state.pendingAnchor?.totalScreens || 0,
+        nodeId: data.node_id || '',
+      });
+    }
 
-function ensureScreensGallery(total) {
-  if (!_screenContainerId || !document.getElementById(_screenContainerId)) {
-    _screenContainerId = 'screens-' + Date.now();
-    _screenBuffer = [];
-    appendToCanvas(`
+    function ensureScreensGallery(total) {
+      if (!_screenContainerId || !document.getElementById(_screenContainerId)) {
+        _screenContainerId = 'screens-' + Date.now();
+        _screenBuffer = [];
+        appendToCanvas(`
       <div class="result-card" id="${_screenContainerId}">
         <div class="result-card-header">
           <div class="result-card-label">
@@ -1875,80 +2283,80 @@ function ensureScreensGallery(total) {
         </div>
       </div>
     `);
-  }
-}
+      }
+    }
 
-function appendGalleryThumb({ image_b64, name, filename, index, total, isAnchor = false, nodeId = '' }) {
-  if (!_screenContainerId) return;
-  const grid = document.getElementById(`grid-${_screenContainerId}`);
-  if (!grid) return;
+    function appendGalleryThumb({ image_b64, name, filename, index, total, isAnchor = false, nodeId = '' }) {
+      if (!_screenContainerId) return;
+      const grid = document.getElementById(`grid-${_screenContainerId}`);
+      if (!grid) return;
 
-  const thumb = document.createElement('div');
-  thumb.className = 'screen-thumb' + (isAnchor ? ' anchor-thumb' : '');
-  if (nodeId) thumb.dataset.nodeId = nodeId;
-  const position = index || (_screenBuffer.length + 1);
-  const suffix = total ? `/${total}` : '';
-  thumb.innerHTML = `
+      const thumb = document.createElement('div');
+      thumb.className = 'screen-thumb' + (isAnchor ? ' anchor-thumb' : '');
+      if (nodeId) thumb.dataset.nodeId = nodeId;
+      const position = index || (_screenBuffer.length + 1);
+      const suffix = total ? `/${total}` : '';
+      thumb.innerHTML = `
     <img src="data:image/png;base64,${image_b64}" alt="${escHtml(name || 'Screen')}" onclick="openZoom('data:image/png;base64,${image_b64}')">
     <div class="screen-thumb-label">
       <span>${escHtml(isAnchor ? 'Anchor' : (name || 'Screen'))}</span>
       <span class="screen-num">#${position}${suffix}</span>
     </div>
   `;
-  grid.appendChild(thumb);
-  _screenBuffer.push({ image_b64, name, filename, index: position, total, isAnchor });
+      grid.appendChild(thumb);
+      _screenBuffer.push({ image_b64, name, filename, index: position, total, isAnchor });
 
-  const container = document.getElementById(_screenContainerId);
-  if (container) {
-    container.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }
-}
+      const container = document.getElementById(_screenContainerId);
+      if (container) {
+        container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
 
-function slugifyFlowName(value) {
-  return String(value || 'screen').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'screen';
-}
+    function slugifyFlowName(value) {
+      return String(value || 'screen').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'screen';
+    }
 
-function buildFallbackFlowGraph(anchorName, remainingScreens) {
-  const screens = [anchorName, ...(remainingScreens || [])].filter(Boolean);
-  const nodes = screens.map((screen, index) => ({
-    id: `${slugifyFlowName(screen)}_${index + 1}`,
-    screen,
-    label: screen,
-    order: index + 1,
-  }));
-  const relations = nodes.slice(1).map((node, index) => ({
-    from: nodes[index].id,
-    to: node.id,
-    type: index === 0 ? 'entry' : 'next',
-    label: index === 0 ? 'next screen' : 'continues to',
-  }));
-  return { nodes, relations };
-}
+    function buildFallbackFlowGraph(anchorName, remainingScreens) {
+      const screens = [anchorName, ...(remainingScreens || [])].filter(Boolean);
+      const nodes = screens.map((screen, index) => ({
+        id: `${slugifyFlowName(screen)}_${index + 1}`,
+        screen,
+        label: screen,
+        order: index + 1,
+      }));
+      const relations = nodes.slice(1).map((node, index) => ({
+        from: nodes[index].id,
+        to: node.id,
+        type: index === 0 ? 'entry' : 'next',
+        label: index === 0 ? 'next screen' : 'continues to',
+      }));
+      return { nodes, relations };
+    }
 
-function scheduleFlowRender() {
-  if (state._flowRenderQueued) return;
-  state._flowRenderQueued = true;
-  requestAnimationFrame(() => {
-    state._flowRenderQueued = false;
-    renderFlowConnections();
-  });
-}
+    function scheduleFlowRender() {
+      if (state._flowRenderQueued) return;
+      state._flowRenderQueued = true;
+      requestAnimationFrame(() => {
+        state._flowRenderQueued = false;
+        renderFlowConnections();
+      });
+    }
 
-function renderFlowConnections() {
-  if (!_screenContainerId || !state.flowGraph?.relations?.length) return;
+    function renderFlowConnections() {
+      if (!_screenContainerId || !state.flowGraph?.relations?.length) return;
 
-  const stage = document.getElementById(`stage-${_screenContainerId}`);
-  const svg = document.getElementById(`flow-${_screenContainerId}`);
-  const grid = document.getElementById(`grid-${_screenContainerId}`);
-  if (!stage || !svg || !grid) return;
+      const stage = document.getElementById(`stage-${_screenContainerId}`);
+      const svg = document.getElementById(`flow-${_screenContainerId}`);
+      const grid = document.getElementById(`grid-${_screenContainerId}`);
+      if (!stage || !svg || !grid) return;
 
-  const stageRect = stage.getBoundingClientRect();
-  if (!stageRect.width || !stageRect.height) return;
+      const stageRect = stage.getBoundingClientRect();
+      if (!stageRect.width || !stageRect.height) return;
 
-  svg.setAttribute('viewBox', `0 0 ${stageRect.width} ${stageRect.height}`);
-  svg.setAttribute('width', stageRect.width);
-  svg.setAttribute('height', stageRect.height);
-  svg.innerHTML = `
+      svg.setAttribute('viewBox', `0 0 ${stageRect.width} ${stageRect.height}`);
+      svg.setAttribute('width', stageRect.width);
+      svg.setAttribute('height', stageRect.height);
+      svg.innerHTML = `
     <defs>
       <marker id="flowArrow-${_screenContainerId}" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
         <path d="M0,0 L12,6 L0,12 z"></path>
@@ -1956,55 +2364,56 @@ function renderFlowConnections() {
     </defs>
   `;
 
-  const thumbs = Array.from(grid.querySelectorAll('.screen-thumb[data-node-id]'));
-  const thumbById = new Map(thumbs.map(el => [el.dataset.nodeId, el]));
-  const relations = state.flowGraph.relations || state.flowGraph.edges || [];
+      const thumbs = Array.from(grid.querySelectorAll('.screen-thumb[data-node-id]'));
+      const thumbById = new Map(thumbs.map(el => [el.dataset.nodeId, el]));
+      const relations = state.flowGraph.relations || state.flowGraph.edges || [];
 
-  relations.forEach(rel => {
-    const source = thumbById.get(rel.from);
-    const target = thumbById.get(rel.to);
-    if (!source || !target) return;
+      relations.forEach(rel => {
+        const source = thumbById.get(rel.from);
+        const target = thumbById.get(rel.to);
+        if (!source || !target) return;
 
-    const sourceRect = source.getBoundingClientRect();
-    const targetRect = target.getBoundingClientRect();
-    const x1 = sourceRect.left + sourceRect.width / 2 - stageRect.left;
-    const y1 = sourceRect.bottom - stageRect.top;
-    const x2 = targetRect.left + targetRect.width / 2 - stageRect.left;
-    const y2 = targetRect.top - stageRect.top;
-    const bend = Math.max(56, Math.abs(y2 - y1) * 0.4);
-    const path = `M ${x1} ${y1} C ${x1} ${y1 + bend} ${x2} ${y2 - bend} ${x2} ${y2}`;
+        const sourceRect = source.getBoundingClientRect();
+        const targetRect = target.getBoundingClientRect();
+        const x1 = sourceRect.left + sourceRect.width / 2 - stageRect.left;
+        const y1 = sourceRect.bottom - stageRect.top;
+        const x2 = targetRect.left + targetRect.width / 2 - stageRect.left;
+        const y2 = targetRect.top - stageRect.top;
+        const bend = Math.max(56, Math.abs(y2 - y1) * 0.4);
+        const path = `M ${x1} ${y1} C ${x1} ${y1 + bend} ${x2} ${y2 - bend} ${x2} ${y2}`;
 
-    const backdrop = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    backdrop.setAttribute('d', path);
-    backdrop.setAttribute('class', 'flow-backdrop');
-    backdrop.setAttribute('marker-end', `url(#flowArrow-${_screenContainerId})`);
+        const backdrop = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        backdrop.setAttribute('d', path);
+        backdrop.setAttribute('class', 'flow-backdrop');
+        backdrop.setAttribute('marker-end', `url(#flowArrow-${_screenContainerId})`);
 
-    const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    line.setAttribute('d', path);
-    line.setAttribute('marker-end', `url(#flowArrow-${_screenContainerId})`);
-    line.setAttribute('data-relation', rel.type || 'next');
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        line.setAttribute('d', path);
+        line.setAttribute('marker-end', `url(#flowArrow-${_screenContainerId})`);
+        line.setAttribute('data-relation', rel.type || 'next');
 
-    svg.appendChild(backdrop);
-    svg.appendChild(line);
-  });
-}
+        svg.appendChild(backdrop);
+        svg.appendChild(line);
+      });
+    }
 
-// ─── ANCHOR ACTIONS ───────────────────────────────────────────────────────────
-function approveAnchor() {
-  if (!state.pendingAnchor) { showToast('No anchor to approve'); return; }
-  if (state.generating) { showToast('Wait for current generation'); return; }
+    // ─── ANCHOR ACTIONS ───────────────────────────────────────────────────────────
+    function approveAnchor() {
+      if (!state.pendingAnchor) { showToast('No anchor to approve'); return; }
+      if (state.generating) { showToast('Wait for current generation'); return; }
 
-  const endpoint = MODES.find(m => m.id === 'ui')?.endpoint || '/ws/ui';
-  const wsUrl = state.serverBase + endpoint;
+      const endpoint = MODES.find(m => m.id === 'ui')?.endpoint || '/ws/ui';
+      const wsUrl = state.serverBase + endpoint;
 
-  const payload = {
-    session_id: state.sessionId,
-    query: '',
-    platform: state.platform,
-    ui_action: 'approve_anchor',
-  };
+      const payload = {
+        session_id: state.sessionId,
+        query: '',
+        platform: state.platform,
+        ui_action: 'approve_anchor',
+        pending_anchor: state.pendingAnchor,
+      };
 
-  appendToCanvas(`
+      appendToCanvas(`
     <div class="message ai">
       <div class="msg-avatar ai">◈</div>
       <div class="msg-content">
@@ -2013,28 +2422,29 @@ function approveAnchor() {
     </div>
   `);
 
-  state.generating = true;
-  document.getElementById('sendBtn').disabled = true;
-  connectAndSend(wsUrl, payload);
-}
+      state.generating = true;
+      document.getElementById('sendBtn').disabled = true;
+      connectAndSend(wsUrl, payload);
+    }
 
-function reviseAnchor() {
-  const feedback = prompt('Describe what to change in the anchor design:');
-  if (!feedback) return;
-  if (state.generating) { showToast('Wait for current generation'); return; }
+    function reviseAnchor() {
+      const feedback = prompt('Describe what to change in the anchor design:');
+      if (!feedback) return;
+      if (state.generating) { showToast('Wait for current generation'); return; }
 
-  const endpoint = '/ws/ui';
-  const wsUrl = state.serverBase + endpoint;
+      const endpoint = '/ws/ui';
+      const wsUrl = state.serverBase + endpoint;
 
-  const payload = {
-    session_id: state.sessionId,
-    query: feedback,
-    platform: state.platform,
-    ui_action: 'revise_anchor',
-    anchor_feedback: feedback,
-  };
+      const payload = {
+        session_id: state.sessionId,
+        query: feedback,
+        platform: state.platform,
+        ui_action: 'revise_anchor',
+        anchor_feedback: feedback,
+        pending_anchor: state.pendingAnchor,
+      };
 
-  appendToCanvas(`
+      appendToCanvas(`
     <div class="message user">
       <div class="msg-avatar user">U</div>
       <div class="msg-content">
@@ -2043,83 +2453,84 @@ function reviseAnchor() {
     </div>
   `);
 
-  state.generating = true;
-  document.getElementById('sendBtn').disabled = true;
-  connectAndSend(wsUrl, payload);
-}
+      state.generating = true;
+      document.getElementById('sendBtn').disabled = true;
+      connectAndSend(wsUrl, payload);
+    }
 
-function doneGenerating() {
-  state.generating = false;
-  document.getElementById('sendBtn').disabled = false;
-}
+    function doneGenerating() {
+      state.generating = false;
+      document.getElementById('sendBtn').disabled = false;
+    }
 
-// ─── UI HELPERS ───────────────────────────────────────────────────────────────
-function showErrorBanner(msg) {
-  appendToCanvas(`
+    // ─── UI HELPERS ───────────────────────────────────────────────────────────────
+    function showErrorBanner(msg) {
+      appendToCanvas(`
     <div class="error-banner">
       <span>⚠️</span>
       <div>${escHtml(msg)}</div>
     </div>
   `);
-}
+    }
 
-function openZoom(src) {
-  document.getElementById('zoomImg').src = src;
-  document.getElementById('zoomOverlay').style.display = 'flex';
-  document.body.style.overflow = 'hidden';
-}
+    function openZoom(src) {
+      document.getElementById('zoomImg').src = src;
+      document.getElementById('zoomOverlay').style.display = 'flex';
+      document.body.style.overflow = 'hidden';
+    }
 
-function closeZoom() {
-  document.getElementById('zoomOverlay').style.display = 'none';
-  document.body.style.overflow = '';
-}
+    function closeZoom() {
+      document.getElementById('zoomOverlay').style.display = 'none';
+      document.body.style.overflow = '';
+    }
 
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') closeZoom();
-});
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') closeZoom();
+    });
 
-function downloadImage(b64, filename) {
-  const a = document.createElement('a');
-  a.href = 'data:image/png;base64,' + b64;
-  a.download = filename || 'morphic_output.png';
-  a.click();
-  showToast('Downloaded ' + filename);
-}
-
-function downloadAllScreens(containerId) {
-  const imgs = document.querySelectorAll(`#grid-${containerId} img`);
-  imgs.forEach((img, i) => {
-    setTimeout(() => {
+    function downloadImage(b64, filename) {
       const a = document.createElement('a');
-      a.href = img.src;
-      a.download = `screen_${i+1}.png`;
+      a.href = 'data:image/png;base64,' + b64;
+      a.download = filename || 'morphic_output.png';
       a.click();
-    }, i * 200);
-  });
-}
+      showToast('Downloaded ' + filename);
+    }
 
-function setAsReference(b64, name) {
-  state.refImageB64 = b64;
-  showReferenceStrip('data:image/png;base64,' + b64, name);
-  showToast('Set as reference image');
-}
+    function downloadAllScreens(containerId) {
+      const imgs = document.querySelectorAll(`#grid-${containerId} img`);
+      imgs.forEach((img, i) => {
+        setTimeout(() => {
+          const a = document.createElement('a');
+          a.href = img.src;
+          a.download = `screen_${i + 1}.png`;
+          a.click();
+        }, i * 200);
+      });
+    }
 
-function showToast(msg) {
-  const old = document.getElementById('toastEl');
-  if (old) old.remove();
-  const t = document.createElement('div');
-  t.className = 'toast';
-  t.id = 'toastEl';
-  t.textContent = msg;
-  document.body.appendChild(t);
-  setTimeout(() => t.remove(), 2500);
-}
+    function setAsReference(b64, name) {
+      state.refImageB64 = b64;
+      showReferenceStrip('data:image/png;base64,' + b64, name);
+      showToast('Set as reference image');
+    }
 
-function escHtml(str) {
-  const d = document.createElement('div');
-  d.appendChild(document.createTextNode(str || ''));
-  return d.innerHTML;
-}
-</script>
+    function showToast(msg) {
+      const old = document.getElementById('toastEl');
+      if (old) old.remove();
+      const t = document.createElement('div');
+      t.className = 'toast';
+      t.id = 'toastEl';
+      t.textContent = msg;
+      document.body.appendChild(t);
+      setTimeout(() => t.remove(), 2500);
+    }
+
+    function escHtml(str) {
+      const d = document.createElement('div');
+      d.appendChild(document.createTextNode(str || ''));
+      return d.innerHTML;
+    }
+  </script>
 </body>
+
 </html>

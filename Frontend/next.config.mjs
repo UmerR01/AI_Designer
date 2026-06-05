@@ -29,6 +29,13 @@ const nextConfig = {
     },
     proxyClientMaxBodySize: "200mb",
   },
+  // Raise the API route body parser limit so large base64 image uploads don't fail.
+  // Default is 4 MB; landing page images sent as data: URLs can be 2-10 MB each.
+  api: {
+    bodyParser: {
+      sizeLimit: "50mb",
+    },
+  },
 }
 
 export default nextConfig

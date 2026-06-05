@@ -163,6 +163,7 @@ type PersistedEditorData = {
   openFolders: Record<string, boolean>;
   generatedUiImages?: GeneratedUiImage[];
   uiFlowGraph?: UiFlowGraph | null;
+  savedAt?: string;
 };
 
 function initials(first: string | undefined, last: string | undefined, email: string | undefined) {
@@ -572,11 +573,39 @@ export default function ProjectEditorPage() {
       }
 
       const hydratedDbAssets = hydrateLoadedGeneratedImages(assetsFromDb);
+
+      // Build a merged image list: start with remote metadata, but prefer local data: URLs
+      // over remote asset:// placeholders, and prefer DB URLs over both.
+      // Priority order for URL: real DB URL > data: (local cache) > asset:// placeholder.
+      const remoteImgs = remoteParsedData?.generatedUiImages ?? [];
+      const localImgs = localParsedData?.generatedUiImages ?? [];
+
+      // Build a map of local images by id to quickly look up data: URLs.
+      const localById = new Map<string, GeneratedUiImage>();
+      for (const img of localImgs) {
+        if (img.id) localById.set(img.id, img);
+      }
+
+      // Merge: use remote as base (has richer metadata), but upgrade asset:// to local data: URL
+      // if available, then further upgrade to real DB URL if available.
+      const mergedImgs: GeneratedUiImage[] = [
+        ...remoteImgs.map((img) => {
+          let url = img.url;
+          // Swap asset:// placeholder: prefer DB URL, then local data: URL
+          if (url?.startsWith("asset://")) {
+            const localVersion = localById.get(img.id);
+            if (localVersion?.url && !localVersion.url.startsWith("asset://")) {
+              url = localVersion.url; // use local data: URL as fallback
+            }
+          }
+          return { ...img, url };
+        }),
+        // Include any local-only images not in remote (e.g. generated but not yet saved remotely)
+        ...localImgs.filter((img) => img.id && !remoteImgs.some((r) => r.id === img.id)),
+      ];
+
       const projectImageMeta = hydrateLoadedGeneratedImages(
-        dedupeGeneratedImages([
-          ...(remoteParsedData?.generatedUiImages ?? []),
-          ...(localParsedData?.generatedUiImages ?? []),
-        ]),
+        dedupeGeneratedImages(mergedImgs),
         hydratedDbAssets,
       );
       const mergedServerImages = dedupeGeneratedImages(
@@ -916,6 +945,9 @@ export default function ProjectEditorPage() {
         (img) => !String(img.page_name || "").toLowerCase().includes("style guide"),
       );
 
+      // Upload each image individually — base64 data: URLs can be 2-10 MB each and
+      // a combined payload can exceed the server body-size limit, causing a silent 413
+      // that leaves images unresolvable after project reload.
       for (const img of screens) {
         try {
           await postJson(`/api/projects/${projectId}/assets`, {
@@ -924,7 +956,7 @@ export default function ProjectEditorPage() {
             uiFlowGraph: resolvePersistedFlowGraph(flow, images),
           });
         } catch (e) {
-          console.warn("[project] asset upload failed for", img.screenName || img.id, e);
+          console.error("[project] asset upload failed for image", img.id, img.page_name, e);
         }
       }
 
@@ -972,6 +1004,7 @@ export default function ProjectEditorPage() {
   const lastAutoSyncedImagesRef = useRef<string>("");
   const persistInFlightRef = useRef(false);
   const persistBackoffUntilRef = useRef(0);
+  const autoSaveErrorToastAtRef = useRef(0);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
 
@@ -1153,6 +1186,15 @@ export default function ProjectEditorPage() {
     const timeout = window.setTimeout(() => {
       void persistProjectData().catch((e: unknown) => {
         console.warn("[project] auto-save failed", e);
+        const now = Date.now();
+        if (now - autoSaveErrorToastAtRef.current < 60_000) return;
+        autoSaveErrorToastAtRef.current = now;
+        const err = e as { detail?: string; message?: string };
+        toast.error(
+          err?.detail ??
+            err?.message ??
+            "Could not auto-save project. Use Save or check your connection.",
+        );
       });
     }, 1500);
     return () => window.clearTimeout(timeout);
@@ -1278,7 +1320,9 @@ export default function ProjectEditorPage() {
 
   const filesLabel = sidebarFilesLabel(projectKind);
   const activeNode = useMemo(() => findNodeById(tree, activeId), [tree, activeId]);
-  const showDesignerChat = useMemo(() => treeHasScreens(tree), [tree]);
+  const showDesignerChat = useMemo(() => {
+    return treeHasScreens(tree);
+  }, [tree]);
 
   useEffect(() => {
     const count = countScreensInTree(tree);
@@ -1683,6 +1727,28 @@ export default function ProjectEditorPage() {
     setTree((prev) => addSectionToScreen(prev, screenId, "New Section"));
     toast.success("Section expanded.");
   }
+
+  const addSectionToScreenWithId = useCallback(
+    (screenId: string): string => {
+      const newSectionId = crypto.randomUUID();
+      setTree((prev) =>
+        mapTree(prev, (n) => {
+          if (n.kind === "screen" && n.id === screenId) {
+            const sections = n.sections ?? [];
+            return {
+              ...n,
+              sections: [...sections, { id: newSectionId, name: `Canvas ${sections.length + 1}` }],
+            };
+          }
+          return n;
+        })
+      );
+      toast.success("New canvas added below.");
+      return newSectionId;
+    },
+    []
+  );
+
 
   const renderTree = (nodes: EditorTreeNode[], depth = 0) =>
     nodes.map((n) => {
@@ -2474,6 +2540,7 @@ export default function ProjectEditorPage() {
                     onEnsurePrototypeSection={ensurePrototypeSection}
                     activeScreenId={activeId}
                     onCreateDefaultScreen={() => handleHeaderPlus(true)}
+                    onAddSectionToScreen={addSectionToScreenWithId}
                     activeScreen={activeNode?.kind === "screen" ? activeNode : undefined}
                   />
                 </aside>

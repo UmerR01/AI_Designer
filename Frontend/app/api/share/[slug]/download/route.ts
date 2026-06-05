@@ -68,7 +68,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ slug: string }>
     return NextResponse.json({ detail: "No images to download." }, { status: 404 });
   }
 
-  const asset = assetId ? assets.find((a) => a.id === assetId) : assets[0];
+  const asset = assetId ? assets.find((a: any) => a.id === assetId) : assets[0];
   if (!asset) return NextResponse.json({ detail: "Asset not found." }, { status: 404 });
 
   try {
