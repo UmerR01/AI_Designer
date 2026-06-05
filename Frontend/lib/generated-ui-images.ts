@@ -37,7 +37,7 @@ export function landingPrototypeOwnerScreenId(
   return screenIds[0];
 }
 
-/** Backfill [ScreenID:…] on landing images saved before per-screen tagging. */
+/** Backfill [ScreenID:…] and [SectionID:…] on landing images saved before per-section tagging. */
 export function repairLandingPrototypeImageTags<T extends GeneratedUiImageRecord>(
   images: T[],
   tree: EditorTreeNode[],
@@ -51,18 +51,60 @@ export function repairLandingPrototypeImageTags<T extends GeneratedUiImageRecord
     let owner = landingPrototypeOwnerScreenId(img, tree);
     if (!owner) owner = screenIds[0];
 
-    const tagNeedle = `[screenid:${owner}]`;
     const name = img.page_name || "";
-    if (name.toLowerCase().includes(tagNeedle)) return img;
+    const screenTagNeedle = `[screenid:${owner.toLowerCase()}]`;
 
-    const label =
-      name.replace(/\[ScreenID:[^\]]+\]\s*/gi, "").trim() || "Landing Page Prototype";
+    // Step 1: Ensure [ScreenID:...] tag is present
+    let pageName = name;
+    if (!pageName.toLowerCase().includes(screenTagNeedle)) {
+      const label =
+        pageName.replace(/\[ScreenID:[^\]]+\]\s*/gi, "").trim() ||
+        "Landing Page Prototype";
+      pageName = `[ScreenID:${owner}] ${label}`;
+    }
+
+    // Step 2: Backfill [SectionID:...] for images that are missing it (first canvas old saves).
+    // Without a SectionID tag, pickImageForSection falls back to screenName matching which
+    // picks the NEWEST image for every canvas, making older canvases invisible on reload.
+    if (!pageName.match(/\[SectionID:[^\]]+\]/i)) {
+      const ownerScreen = findScreenNodeById(tree, owner);
+      const sections = (ownerScreen as any)?.sections as
+        | Array<{ id: string; name: string }>
+        | undefined;
+      const firstSection = sections?.[0];
+      if (firstSection?.id) {
+        const labelPart =
+          pageName
+            .replace(/\[ScreenID:[^\]]+\]\s*/gi, "")
+            .trim() || "Landing Page Prototype";
+        pageName = `[ScreenID:${owner}] [SectionID:${firstSection.id}] ${labelPart}`;
+      }
+    }
+
+    if (pageName === name && img.screenName) return img;
     return {
       ...img,
-      page_name: `[ScreenID:${owner}] ${label}`,
+      page_name: pageName,
       screenName: img.screenName || "Landing Page",
     };
   });
+}
+
+function findScreenNodeById(
+  tree: EditorTreeNode[],
+  id: string,
+): EditorTreeNode | undefined {
+  for (const node of tree) {
+    if (node.kind === "screen" && node.id === id) return node;
+    if (node.kind === "folder") {
+      const found = findScreenNodeById(
+        (node as Extract<EditorTreeNode, { kind: "folder" }>).children ?? [],
+        id,
+      );
+      if (found) return found;
+    }
+  }
+  return undefined;
 }
 
 /** Human-readable screen label from page_name / filename when screenName was not persisted. */
@@ -88,8 +130,16 @@ export function hydrateLoadedGeneratedImages(
     if (url.startsWith("asset://") && assetsFromDb.length) {
       const ref = url.slice("asset://".length);
       const label = inferScreenLabelFromImage(img)?.toLowerCase();
+      const imgSectionId = img.page_name?.match(/\[SectionID:([^\]]+)\]/i)?.[1]?.toLowerCase();
       const match = assetsFromDb.find((row) => {
         if (row.id === ref || row.id === img.id) return true;
+
+        // If SectionID is present in either, enforce SectionID match and prevent matching different sections
+        const rowSectionId = row.page_name?.match(/\[SectionID:([^\]]+)\]/i)?.[1]?.toLowerCase();
+        if (imgSectionId || rowSectionId) {
+          return Boolean(imgSectionId && rowSectionId && imgSectionId === rowSectionId);
+        }
+
         if (!label) return false;
         const rowLabel = inferScreenLabelFromImage(row)?.toLowerCase();
         return Boolean(rowLabel && rowLabel === label);
@@ -265,6 +315,8 @@ export function mergeProjectGeneratedImages(args: {
     if (img.id) metaByKey.set(img.id, img);
     const sn = (img.screenName || "").trim().toLowerCase();
     if (sn) metaByKey.set(`screen:${sn}`, img);
+    const pageLabelFull = (img.page_name || "").trim().toLowerCase();
+    if (pageLabelFull) metaByKey.set(`screen_full:${pageLabelFull}`, img);
     const pageLabel = (img.page_name || "")
       .replace(/\[SectionID:[^\]]+\]\s*/gi, "")
       .trim()
@@ -286,6 +338,7 @@ export function mergeProjectGeneratedImages(args: {
 
   const fromDb: GeneratedUiImageRecord[] = args.canonical.map((row) => {
     const sourceKey = row.source_image_id || row.id;
+    const pageLabelFull = (row.page_name || "").trim().toLowerCase();
     const pageLabel = (row.page_name || "")
       .replace(/\[SectionID:[^\]]+\]\s*/gi, "")
       .trim()
@@ -293,12 +346,13 @@ export function mergeProjectGeneratedImages(args: {
     const meta =
       metaByKey.get(sourceKey) ||
       metaByKey.get(row.id) ||
+      (pageLabelFull ? metaByKey.get(`screen_full:${pageLabelFull}`) : undefined) ||
       (pageLabel ? metaByKey.get(`screen:${pageLabel}`) : undefined) ||
       ({} as GeneratedUiImageRecord);
 
     return mergeImageFields(
       {
-        id: row.id,
+        id: sourceKey,
         url: row.url,
         filename: row.filename,
         page_name: row.page_name ?? undefined,
@@ -333,6 +387,14 @@ function imagesMatchClientToServer(
   const cNode = client.nodeId || "";
   const sNode = server.nodeId || "";
   if (cNode && sNode && cNode === sNode) return true;
+
+  // If SectionID is present in either, enforce SectionID match and prevent matching different sections
+  const cSec = client.page_name?.match(/\[SectionID:([^\]]+)\]/i)?.[1]?.toLowerCase();
+  const sSec = server.page_name?.match(/\[SectionID:([^\]]+)\]/i)?.[1]?.toLowerCase();
+  if (cSec || sSec) {
+    return Boolean(cSec && sSec && cSec === sSec);
+  }
+
   const cp = (client.page_name || "")
     .replace(/\[SectionID:[^\]]+\]\s*/gi, "")
     .trim()

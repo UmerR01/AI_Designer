@@ -117,7 +117,7 @@ export default function ShareViewClient({ slug }: { slug: string }) {
             <div className="font-display text-2xl tracking-tight">Private link</div>
             <div className="text-sm text-muted-foreground">
               Enter the password to continue.
-              {shareLink?.role === "editor" ? (
+              {(shareLink as any)?.role === "editor" ? (
                 <span className="block mt-1">You will need to sign in to edit this project.</span>
               ) : null}
             </div>

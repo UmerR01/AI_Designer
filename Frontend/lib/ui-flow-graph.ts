@@ -108,7 +108,7 @@ export function resolveFlowNodeId(
     inferScreenLabelFromImage({
       screenName: info.screenName,
       page_name: info.page_name,
-      filename: info.filename,
+      filename: info.filename || "",
     }) ||
     ""
   )

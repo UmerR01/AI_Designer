@@ -22,7 +22,8 @@ export type PrototypeSectionSyncImage = {
 
 /** Prototype flows that use one artboard with multiple vertical sections. */
 export function usesPrototypeSectionCanvas(kind?: string): boolean {
-  return supportsPrototypeFlow(kind);
+  const k = (kind || "").toLowerCase().trim();
+  return supportsPrototypeFlow(kind) || k === "landing page";
 }
 
 function defaultFrameForKind(kind?: string): "desktop" | "mobile" {
@@ -42,16 +43,13 @@ export function shouldConsolidatePrototypeScreens(
   tree: EditorTreeNode[],
   kind?: string,
 ): boolean {
-  if (!supportsPrototypeFlow(kind)) return false;
+  const k = (kind || "").toLowerCase().trim();
+  const isProto = supportsPrototypeFlow(kind);
+  if (!isProto) return false;
   const screens = collectScreens(tree);
   if (screens.length <= 1) return false;
 
-  const k = (kind || "").toLowerCase().trim();
-  if (
-    k === "multi-page website" ||
-    k === "website design" ||
-    k === "landing page"
-  ) {
+  if (k === "multi-page website" || k === "website design") {
     return true;
   }
 
@@ -158,7 +156,9 @@ export function syncPrototypeSectionsToTree(
   sectionMap: Map<string, string>;
 } {
   const sectionMap = new Map<string, string>();
-  if (!supportsPrototypeFlow(kind)) {
+  const k = (kind || "").toLowerCase().trim();
+  const isProto = supportsPrototypeFlow(kind) || k === "landing page";
+  if (!isProto) {
     return { tree, activeId, sectionMap };
   }
 
@@ -318,7 +318,8 @@ export function ensureEditorTreeForHydration(
 
   if (!images.length) return { tree, activeId };
 
-  if (supportsPrototypeFlow(kind)) {
+  const isProto = supportsPrototypeFlow(kind) || (kind || "").toLowerCase().trim() === "landing page";
+  if (isProto) {
     return repairPrototypeTreeForLoad(tree, activeId, images, kind);
   }
 

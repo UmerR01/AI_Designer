@@ -98,6 +98,162 @@ def _spec(platform: str) -> dict:
     return PLATFORM_SPECS.get(platform, PLATFORM_SPECS["mobile"])
 
 
+# Each WebSocket channel may only generate its own artifact type.
+PANEL_SCOPES: dict[str, dict] = {
+    "ui": {
+        "title": "UI design",
+        "can_do": (
+            "mobile, tablet, and desktop app UI screens; style guides; "
+            "screen flows; anchor approval workflows"
+        ),
+        "cannot_do": (
+            "logos, brand marks, marketing landing pages, illustrations, "
+            "social media posts, or unrelated asset types"
+        ),
+        "wrong_channel_hint": (
+            "Use the Logo, Landing Page, Illustration, or Social Media workspace "
+            "for those tasks."
+        ),
+    },
+    "landing_page": {
+        "title": "Landing page design",
+        "can_do": (
+            "split-artboard marketing landing pages and long single-page website prototypes"
+        ),
+        "cannot_do": (
+            "logos, mobile/web app UI screen flows, illustrations, or social media posts"
+        ),
+        "wrong_channel_hint": (
+            "Use the UI workspace for app screens, or Logo / Illustration / Social Media "
+            "for those assets."
+        ),
+    },
+    "logo": {
+        "title": "Logo design",
+        "can_do": "logo marks, wordmarks, and logo refinements",
+        "cannot_do": (
+            "app UI screens, landing pages, illustrations, or social media posts"
+        ),
+        "wrong_channel_hint": (
+            "Use UI, Landing Page, Illustration, or Social Media workspaces instead."
+        ),
+    },
+    "illustration": {
+        "title": "Illustration",
+        "can_do": "illustrations, artwork, and illustration edits",
+        "cannot_do": "logos, app UI screens, landing pages, or social media posts",
+        "wrong_channel_hint": (
+            "Use Logo, UI, Landing Page, or Social Media workspaces for those tasks."
+        ),
+    },
+    "social_media": {
+        "title": "Social media design",
+        "can_do": "Instagram, Twitter/X, and other social post graphics",
+        "cannot_do": "logos, app UI screens, landing pages, or general illustrations",
+        "wrong_channel_hint": (
+            "Use Logo, UI, Landing Page, or Illustration workspaces for those tasks."
+        ),
+    },
+}
+
+
+def panel_scope_block(panel: str) -> str:
+    """Restriction text for text-model routing (classify_panel_message). Not sent to the image model."""
+    scope = PANEL_SCOPES.get(panel, PANEL_SCOPES["ui"])
+    return f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHANNEL SCOPE (MANDATORY)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You are generating content ONLY for the "{scope['title']}" channel.
+Allowed: {scope['can_do']}.
+Forbidden: {scope['cannot_do']}.
+Do NOT produce outputs outside this channel even if the user asks.
+"""
+
+
+def _default_out_of_scope_reply(panel: str) -> str:
+    scope = PANEL_SCOPES.get(panel, PANEL_SCOPES["ui"])
+    return (
+        f"I can only help with {scope['can_do']} in this workspace. "
+        f"I cannot create {scope['cannot_do']} here. {scope['wrong_channel_hint']}"
+    )
+
+
+def _default_chat_reply(panel: str) -> str:
+    scope = PANEL_SCOPES.get(panel, PANEL_SCOPES["ui"])
+    return (
+        f"I'm your {scope['title']} assistant. Ask me anything about {scope['can_do']}, "
+        f"or describe what you want to generate."
+    )
+
+
+def classify_panel_message(
+    panel: str,
+    user_input: str,
+    forced_platform: Optional[str] = None,
+) -> dict:
+    """
+    Per-channel intent: chat (no image), generate (in-scope), or out_of_scope.
+    Used by dedicated sockets so landing cannot run logo jobs, etc.
+    """
+    scope = PANEL_SCOPES.get(panel, PANEL_SCOPES["ui"])
+    platform_rule = ""
+    if forced_platform and forced_platform not in ("auto", "none", ""):
+        platform_rule = f'User selected platform="{forced_platform}". Respect it for generate mode.'
+
+    prompt = f"""
+You are the assistant for the "{scope['title']}" workspace channel ONLY.
+
+User message:
+"{user_input}"
+
+{platform_rule}
+
+This channel can ONLY create or discuss:
+{scope['can_do']}
+
+This channel must REFUSE generation requests for:
+{scope['cannot_do']}
+
+Return ONLY valid JSON:
+{{
+  "mode": "chat" | "generate" | "out_of_scope",
+  "reply": "short friendly assistant message when mode is chat or out_of_scope",
+  "is_edit": true | false
+}}
+
+Rules:
+- Greetings, questions, advice, brainstorming, clarifications -> mode=chat (reply in character for this channel).
+- Clear in-scope create/generate/design/modify request -> mode=generate.
+- User asks for a deliverable this channel cannot produce (e.g. logo on landing channel) -> mode=out_of_scope.
+  Reply must state what THIS channel can do and mention: {scope['wrong_channel_hint']}
+- Refine/change existing work in this channel -> mode=generate, is_edit=true.
+- Output JSON only. No markdown.
+"""
+    resp = _generate_content_with_retry(
+        model=TEXT_MODEL,
+        contents=[prompt],
+        max_retries=4,
+        label=f"{panel} panel message classification",
+    )
+    parsed = _safe_json_parse(resp.text)
+    mode = parsed.get("mode", "chat")
+    if mode not in ("chat", "generate", "out_of_scope"):
+        mode = "chat"
+    if not parsed.get("reply"):
+        if mode == "out_of_scope":
+            parsed["reply"] = _default_out_of_scope_reply(panel)
+        elif mode == "chat":
+            parsed["reply"] = _default_chat_reply(panel)
+    parsed["mode"] = mode
+    parsed["is_edit"] = bool(parsed.get("is_edit", False))
+    return parsed
+
+
+def _with_panel_scope(prompt: str, panel: str) -> str:
+    return f"{panel_scope_block(panel)}{prompt}"
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # SESSION MEMORY HELPERS
 # ──────────────────────────────────────────────────────────────────────────────
@@ -195,6 +351,38 @@ async def ws_send(ws: WebSocket, event: str, data: dict) -> None:
     await ws.send_json({"event": event, **data})
 
 
+async def ws_send_generation_error(
+    ws: WebSocket,
+    exc: Exception,
+    *,
+    prefix: str = "",
+) -> None:
+    payload = generation_error_payload(exc)
+    if prefix:
+        payload["message"] = f"{prefix}{payload['message']}"
+    await ws_send(ws, "error", payload)
+
+
+class ImageGenerationError(RuntimeError):
+    """Raised when the image model returns no image or the call fails."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = True,
+        code: str = "generation_failed",
+        user_message: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.code = code
+        self.user_message = user_message or message
+
+    def __str__(self) -> str:
+        return self.user_message
+
+
 def _is_retryable_generation_error(err: Exception) -> bool:
     message = str(err).lower()
     return (
@@ -208,8 +396,105 @@ def _is_retryable_generation_error(err: Exception) -> bool:
 def _backoff_seconds(attempt: int, err: Exception) -> int:
     # Rate-limit failures often require a longer cooldown than transient failures.
     if _is_retryable_generation_error(err):
-        return min(5 * 2, 90)
+        return min(5 * 2 ** attempt, 90)
     return min(3 * attempt, 20)
+
+
+def _wrap_api_error(exc: Exception) -> ImageGenerationError:
+    if _is_retryable_generation_error(exc):
+        return ImageGenerationError(
+            str(exc),
+            retryable=True,
+            code="rate_limited",
+            user_message=(
+                "The image API is temporarily busy (rate limit or quota). "
+                "Wait 1–2 minutes, then try again."
+            ),
+        )
+    return ImageGenerationError(
+        str(exc),
+        retryable=False,
+        code="api_error",
+        user_message=f"Image API error: {exc}",
+    )
+
+
+def _extract_image_bytes_from_response(response: object) -> bytes:
+    """
+    Parse a Gemini image response without assuming candidates[0].content exists.
+    Raises ImageGenerationError (retryable) when the model returns no image bytes.
+    """
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        raise ImageGenerationError(
+            "Model returned no candidates.",
+            retryable=True,
+            code="no_candidates",
+            user_message="The model did not return an image. Please try again with a shorter prompt.",
+        )
+
+    candidate = candidates[0]
+    finish_reason = getattr(candidate, "finish_reason", None)
+    content = getattr(candidate, "content", None)
+    if content is None:
+        reason = str(finish_reason or "unknown").replace("FinishReason.", "")
+        raise ImageGenerationError(
+            f"Model returned empty content (finish_reason={reason}).",
+            retryable=True,
+            code="no_image_content",
+            user_message=(
+                f"The model did not produce an image ({reason}). "
+                "Try a simpler brief or retry in a moment."
+            ),
+        )
+
+    parts = getattr(content, "parts", None) or []
+    for part in parts:
+        inline = getattr(part, "inline_data", None)
+        data = getattr(inline, "data", None) if inline else None
+        if data:
+            return data
+
+    text_snippets: list[str] = []
+    for part in parts:
+        text = getattr(part, "text", None)
+        if text:
+            text_snippets.append(str(text).strip())
+
+    detail = " ".join(text_snippets)[:280] if text_snippets else "no image data in response"
+    raise ImageGenerationError(
+        f"Model response contained no image ({detail}).",
+        retryable=True,
+        code="no_image_parts",
+        user_message=(
+            "The model responded without an image. "
+            "Try rephrasing your request or wait a moment and retry."
+        ),
+    )
+
+
+def generation_error_payload(exc: Exception) -> dict:
+    """WebSocket-friendly error body for failed image generation."""
+    if isinstance(exc, ImageGenerationError):
+        return {
+            "message": exc.user_message,
+            "code": exc.code,
+            "retryable": exc.retryable,
+        }
+    if _is_retryable_generation_error(exc):
+        return {
+            "message": (
+                "The image API is temporarily busy (rate limit or quota). "
+                "Wait 1–2 minutes, then try again."
+            ),
+            "code": "rate_limited",
+            "retryable": True,
+        }
+    return {
+        "message": str(exc) or "Image generation failed.",
+        "code": "generation_failed",
+        "retryable": False,
+    }
 
 
 def _generate_content_with_retry(
@@ -343,13 +628,19 @@ def classify_ui_chat_intent(user_input: str, forced_platform: Optional[str] = No
             f'You MUST return "platform": "{forced_platform}".'
         )
 
+    ui_scope = PANEL_SCOPES["ui"]
     prompt = f"""
-You are an AI UI design assistant.
+You are an AI UI design assistant for the UI workspace channel ONLY.
 
 User message:
 "{user_input}"
 
 {platform_rule}
+
+This channel can ONLY: {ui_scope['can_do']}.
+This channel must NOT generate: {ui_scope['cannot_do']}.
+If the user asks for logo, landing page, illustration, or social post -> mode=chat and reply
+that this is the UI workspace only; suggest: {ui_scope['wrong_channel_hint']}
 
 Return ONLY valid JSON:
 {{
@@ -363,6 +654,7 @@ Return ONLY valid JSON:
 
 Rules:
 - If user asks strategy/advice/discussion and not generation request -> mode=chat.
+- If user asks for out-of-channel assets (logo, landing page, etc.) -> mode=chat with a clear refusal in reply.
 - If user asks to create/generate UI flow -> mode=start_ui.
 - If user explicitly asks for one specific screen -> mode=generate_specific_screen and fill specific_screen.
 - If user says approve/continue/looks good -> mode=approve_anchor.
@@ -455,6 +747,43 @@ def _build_screen_graph(screens: list[str], navigation: dict, platform: str) -> 
         })
 
     return {"nodes": nodes, "relations": relations}
+
+
+def _ui_flow_from_pending_anchor(raw: dict) -> dict:
+    """Rebuild UI flow from the browser-held anchor payload if server memory was lost."""
+    pending = raw.get("pending_anchor") or {}
+    if not isinstance(pending, dict):
+        return {}
+
+    anchor_b64 = pending.get("image_b64") or pending.get("anchor_bytes_b64")
+    if not anchor_b64:
+        return {}
+
+    anchor_screen = pending.get("screen") or "Dashboard"
+    remaining = pending.get("remaining_screens") or []
+    screens = pending.get("screens") or [anchor_screen, *remaining]
+    platform = pending.get("platform") or raw.get("platform") or "mobile"
+    navigation = pending.get("navigation") or {
+        "type": _spec(platform)["nav_type"],
+        "items": [
+            {"label": screen, "icon": _safe_slug(screen), "screen": screen}
+            for screen in normalize_ui_screens("", platform, screens)
+        ],
+    }
+    screens = normalize_ui_screens("", platform, screens)
+    graph = pending.get("screen_graph") or _build_screen_graph(screens, navigation, platform)
+
+    return {
+        "query": pending.get("query") or raw.get("query") or "Professional application UI",
+        "platform": platform,
+        "screens": screens,
+        "navigation": navigation,
+        "screen_graph": graph,
+        "style_bytes_b64": pending.get("style_guide_b64") or "",
+        "anchor_bytes_b64": anchor_b64,
+        "anchor_screen": anchor_screen,
+        "approved": False,
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -584,6 +913,18 @@ def build_screen_prompt(
 Generate EXACTLY ONE high-fidelity {spec['label']} UI screen.
 
 The output must look like a REAL screenshot captured directly from a production-ready application.
+Design it as a senior product designer would: practical, polished, content-rich, and tailored to the user's domain.
+Avoid generic template sections. Every card, metric, label, image, chart, and CTA must feel specific to this app concept.
+
+QUALITY BAR:
+- production SaaS / consumer app quality, not a student mockup
+- clear visual hierarchy with purposeful spacing
+- realistic data density for the screen type
+- complete viewport with no cropped controls or cut-off text
+- restrained, coherent color system with strong contrast
+- app-specific content and workflows, not lorem ipsum or generic filler
+- use believable product names, metrics, statuses, filters, profiles, and timestamps
+- include the exact navigation system and active state requested below
 
 DO NOT add any spec overlays, measurement callouts, rulers, annotation labels, or layout guides.
 The image must not contain text like 44px, 34px, A/B/C markers, spacing notes, wireframe hints, or design-system markup.
@@ -832,6 +1173,9 @@ Use:
 - premium UI hierarchy
 - realistic cards
 - production-quality layouts
+- domain-specific empty/error/success states where useful
+- screen-specific actions that a real user would take
+- enough content to make the UI feel operational, not decorative
 
 The screen should feel:
 - complete
@@ -935,6 +1279,65 @@ The result should be a clean prototype board that makes it easy to review the la
 """
 
 
+def build_logo_prompt(query: str, *, is_edit: bool, has_reference: bool) -> str:
+    if is_edit and has_reference:
+        body = (
+            f"Modify this logo image based on: {query}. "
+            "Keep all other styles, fonts, and layouts identical."
+        )
+    elif has_reference:
+        body = (
+            f"Using this image as a strict style and consistency reference, "
+            f"generate a logo for: {query}. "
+            "Maintain same design language, color palette, and typography. "
+            "High-fidelity, clean vector-style, transparent or clean background."
+        )
+    else:
+        body = (
+            f"Professional logo design: {query}. "
+            "High-fidelity, clean vector-style, transparent or clean background."
+        )
+    return body
+
+
+def build_illustration_prompt(query: str, *, is_edit: bool, has_reference: bool) -> str:
+    if is_edit and has_reference:
+        body = (
+            f"Modify this illustration based on: {query}. "
+            "Keep all other styles, colors, and composition identical."
+        )
+    elif has_reference:
+        body = (
+            f"Using this image as a style reference, create a new illustration: {query}. "
+            "Maintain same artistic style, color palette, and visual language."
+        )
+    else:
+        body = f"Professional illustration: {query}."
+    return body
+
+
+def build_social_media_prompt(
+    query: str,
+    platform: str,
+    *,
+    is_edit: bool,
+    has_reference: bool,
+) -> str:
+    if is_edit and has_reference:
+        body = (
+            f"Modify this social media image based on: {query}. "
+            "Keep all other styles, fonts, and layouts identical."
+        )
+    elif has_reference:
+        body = (
+            f"Using this image as a brand consistency reference, create a {platform} post: {query}. "
+            "Maintain same visual identity, color palette, and design language."
+        )
+    else:
+        body = f"Professional {platform} social media post: {query}."
+    return body
+
+
 def get_active_nav_label(screen_name: str, navigation: dict) -> str:
     for item in navigation.get("items", []):
         if item.get("screen", "").lower() == screen_name.lower():
@@ -980,11 +1383,24 @@ def resolve_anchor(
     return _session_last_image(session_id, panel)
 
 
+async def _emit_panel_chat(
+    websocket: WebSocket,
+    session_id: str,
+    panel: str,
+    query: str,
+    reply: str,
+) -> None:
+    _remember_turn(session_id, panel, "user", query=query, intent=panel)
+    _remember_turn(session_id, panel, "assistant", summary=reply)
+    await ws_send(websocket, "assistant_message", {"message": reply})
+    await ws_send(websocket, "done", {})
+
+
 async def _process_landing_page_message(
     websocket: WebSocket,
     raw: dict,
     *,
-    session_panel: str,
+    session_panel: str = "landing_page",
 ) -> None:
     session_id = _normalize_session_id(raw.get("session_id") or raw.get("sessionId"))
     _CURRENT_OUTPUT_DIR.set(_session_output_dir(session_id))
@@ -996,9 +1412,25 @@ async def _process_landing_page_message(
     ctx = _session_context(session_id, session_panel)
 
     if not query and not reference_bytes:
-        await ws_send(websocket, "error", {
-            "message": "Please provide a landing page brief or a reference image."
-        })
+        await _emit_panel_chat(
+            websocket,
+            session_id,
+            session_panel,
+            "",
+            "Send a message or attach a reference image. I can chat about landing pages or generate a split-artboard prototype.",
+        )
+        return
+
+    await ws_send(websocket, "status", {"message": "Understanding your request…"})
+    decision = await asyncio.to_thread(classify_panel_message, session_panel, query or "Landing page")
+    mode = decision.get("mode", "chat")
+
+    if mode == "out_of_scope":
+        await _emit_panel_chat(websocket, session_id, session_panel, query, decision.get("reply", ""))
+        return
+
+    if mode == "chat":
+        await _emit_panel_chat(websocket, session_id, session_panel, query, decision.get("reply", ""))
         return
 
     _remember_turn(session_id, session_panel, "user", query=query, intent="landing_page")
@@ -1019,8 +1451,10 @@ async def _process_landing_page_message(
             reference_bytes,
             filename,
         )
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
-        await ws_send(websocket, "error", {"message": str(exc)})
+        await ws_send_generation_error(websocket, exc)
         return
 
     _remember_turn(session_id, session_panel, "assistant",
@@ -1033,6 +1467,204 @@ async def _process_landing_page_message(
         "platform": "web",
         "layout": "split_artboards",
     })
+
+
+async def _process_logo_message(websocket: WebSocket, raw: dict) -> None:
+    session_id = _normalize_session_id(raw.get("session_id") or raw.get("sessionId"))
+    _CURRENT_OUTPUT_DIR.set(_session_output_dir(session_id))
+    panel = "logo"
+    query = raw.get("query", "").strip()
+    ref_b64 = raw.get("reference_image_b64")
+    prev_b64 = raw.get("previous_image_b64")
+    anchor_bytes = resolve_anchor(ref_b64, prev_b64, session_id, panel)
+    ctx = _session_context(session_id, panel)
+
+    if not query and not anchor_bytes:
+        await _emit_panel_chat(
+            websocket,
+            session_id,
+            panel,
+            "",
+            "Tell me about your brand or describe the logo you want. I can chat or generate logo designs here.",
+        )
+        return
+
+    await ws_send(websocket, "status", {"message": "Understanding your request…"})
+    decision = await asyncio.to_thread(classify_panel_message, panel, query or "Logo design")
+    mode = decision.get("mode", "chat")
+
+    if mode in ("out_of_scope", "chat"):
+        await _emit_panel_chat(websocket, session_id, panel, query, decision.get("reply", ""))
+        return
+
+    is_edit = decision.get("is_edit", False) and anchor_bytes is not None
+    _remember_turn(session_id, panel, "user", query=query, intent="logo", is_edit=is_edit)
+
+    prompt = build_logo_prompt(query, is_edit=is_edit, has_reference=anchor_bytes is not None)
+    if ctx:
+        prompt = f"[Session history]\n{ctx}\n\n{prompt}"
+    filename = "logo_updated.png" if is_edit else "logo_design.png"
+
+    await ws_send(websocket, "status", {"message": "Generating logo…"})
+    try:
+        _, raw_bytes = await asyncio.to_thread(generate_image, prompt, anchor_bytes, filename)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        await ws_send_generation_error(websocket, exc)
+        return
+
+    _remember_turn(session_id, panel, "assistant",
+                   summary="Generated logo", prompt=prompt,
+                   raw_bytes=raw_bytes, filename=filename, intent="logo", is_edit=is_edit)
+    await ws_send(websocket, "logo", {
+        "image_b64": _bytes_to_base64(raw_bytes),
+        "filename": filename,
+        "is_edit": is_edit,
+    })
+
+
+async def _process_illustration_message(websocket: WebSocket, raw: dict) -> None:
+    session_id = _normalize_session_id(raw.get("session_id") or raw.get("sessionId"))
+    _CURRENT_OUTPUT_DIR.set(_session_output_dir(session_id))
+    panel = "illustration"
+    query = raw.get("query", "").strip()
+    ref_b64 = raw.get("reference_image_b64")
+    prev_b64 = raw.get("previous_image_b64")
+    anchor_bytes = resolve_anchor(ref_b64, prev_b64, session_id, panel)
+    ctx = _session_context(session_id, panel)
+
+    if not query and not anchor_bytes:
+        await _emit_panel_chat(
+            websocket,
+            session_id,
+            panel,
+            "",
+            "Describe the illustration you need, or ask a question. I only create illustrations in this workspace.",
+        )
+        return
+
+    await ws_send(websocket, "status", {"message": "Understanding your request…"})
+    decision = await asyncio.to_thread(classify_panel_message, panel, query or "Illustration")
+    mode = decision.get("mode", "chat")
+
+    if mode in ("out_of_scope", "chat"):
+        await _emit_panel_chat(websocket, session_id, panel, query, decision.get("reply", ""))
+        return
+
+    is_edit = decision.get("is_edit", False) and anchor_bytes is not None
+    _remember_turn(session_id, panel, "user", query=query, intent="illustration", is_edit=is_edit)
+
+    prompt = build_illustration_prompt(query, is_edit=is_edit, has_reference=anchor_bytes is not None)
+    if ctx:
+        prompt = f"[Session history]\n{ctx}\n\n{prompt}"
+    filename = "illustration_updated.png" if is_edit else "illustration_design.png"
+
+    await ws_send(websocket, "status", {"message": "Generating illustration…"})
+    try:
+        _, raw_bytes = await asyncio.to_thread(generate_image, prompt, anchor_bytes, filename)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        await ws_send_generation_error(websocket, exc)
+        return
+
+    _remember_turn(session_id, panel, "assistant",
+                   summary="Generated illustration", prompt=prompt,
+                   raw_bytes=raw_bytes, filename=filename, intent="illustration", is_edit=is_edit)
+    await ws_send(websocket, "illustration", {
+        "image_b64": _bytes_to_base64(raw_bytes),
+        "filename": filename,
+        "is_edit": is_edit,
+    })
+
+
+async def _process_social_media_message(websocket: WebSocket, raw: dict) -> None:
+    session_id = _normalize_session_id(raw.get("session_id") or raw.get("sessionId"))
+    _CURRENT_OUTPUT_DIR.set(_session_output_dir(session_id))
+    panel = "social_media"
+    query = raw.get("query", "").strip()
+    forced_plt = raw.get("platform")
+    ref_b64 = raw.get("reference_image_b64")
+    prev_b64 = raw.get("previous_image_b64")
+    anchor_bytes = resolve_anchor(ref_b64, prev_b64, session_id, panel)
+    ctx = _session_context(session_id, panel)
+
+    if not query and not anchor_bytes:
+        await _emit_panel_chat(
+            websocket,
+            session_id,
+            panel,
+            "",
+            "Ask about social creatives or describe a post to generate. This channel is for social media graphics only.",
+        )
+        return
+
+    await ws_send(websocket, "status", {"message": "Understanding your request…"})
+    decision = await asyncio.to_thread(classify_panel_message, panel, query or "Social post", forced_plt)
+    mode = decision.get("mode", "chat")
+
+    if mode in ("out_of_scope", "chat"):
+        await _emit_panel_chat(websocket, session_id, panel, query, decision.get("reply", ""))
+        return
+
+    platform = forced_plt or "instagram"
+    is_edit = decision.get("is_edit", False) and anchor_bytes is not None
+    _remember_turn(session_id, panel, "user", query=query, intent="social_media", platform=platform, is_edit=is_edit)
+
+    prompt = build_social_media_prompt(query, platform, is_edit=is_edit, has_reference=anchor_bytes is not None)
+    if ctx:
+        prompt = f"[Session history]\n{ctx}\n\n{prompt}"
+    filename = "social_media_updated.png" if is_edit else "social_media_design.png"
+
+    await ws_send(websocket, "status", {"message": f"Generating {platform} asset…"})
+    try:
+        _, raw_bytes = await asyncio.to_thread(generate_image, prompt, anchor_bytes, filename)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        await ws_send_generation_error(websocket, exc)
+        return
+
+    _remember_turn(session_id, panel, "assistant",
+                   summary=f"Generated {platform} asset", prompt=prompt,
+                   raw_bytes=raw_bytes, filename=filename,
+                   intent="social_media", platform=platform, is_edit=is_edit)
+    await ws_send(websocket, "social_media", {
+        "image_b64": _bytes_to_base64(raw_bytes),
+        "filename": filename,
+        "platform": platform,
+        "is_edit": is_edit,
+    })
+
+
+async def _run_panel_socket_loop(
+    websocket: WebSocket,
+    handler,
+    *,
+    panel: str,
+) -> None:
+    """Persistent socket: simple chat + scoped generation per message."""
+    current_session_id: Optional[str] = None
+    output_token = _CURRENT_OUTPUT_DIR.set(OUTPUT_DIR)
+    try:
+        while True:
+            raw = await websocket.receive_json()
+            new_session_id = _normalize_session_id(raw.get("session_id") or raw.get("sessionId"))
+            if new_session_id != current_session_id:
+                current_session_id = new_session_id
+                _CURRENT_OUTPUT_DIR.reset(output_token)
+                output_token = _CURRENT_OUTPUT_DIR.set(_session_output_dir(current_session_id))
+            try:
+                await handler(websocket, raw)
+            except asyncio.CancelledError:
+                raise
+    except WebSocketDisconnect:
+        pass
+    except asyncio.CancelledError:
+        raise
+    finally:
+        _CURRENT_OUTPUT_DIR.reset(output_token)
 
 
 @app.websocket("/ws/ui")
@@ -1058,16 +1690,18 @@ async def ws_ui(websocket: WebSocket):
 
 @app.websocket("/ws/landing_page")
 async def ws_landing_page(websocket: WebSocket):
-    """Dedicated websocket for split-artboard landing page prototyping."""
+    """Landing pages only — chat or split-artboard generation."""
     await websocket.accept()
     try:
-        raw = await websocket.receive_json()
-        await _process_landing_page_message(websocket, raw, session_panel="landing_page")
-        await ws_send(websocket, "done", {})
+        async def _handler(ws: WebSocket, raw: dict) -> None:
+            await _process_landing_page_message(ws, raw, session_panel="landing_page")
+            await ws_send(ws, "done", {})
+
+        await _run_panel_socket_loop(websocket, _handler, panel="landing_page")
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        await ws_send(websocket, "error", {"message": str(exc)})
+        await ws_send_generation_error(websocket, exc)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1100,10 +1734,14 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
         # Explicit action path from frontend controls
         if ui_action in {"approve_anchor", "revise_anchor", "generate_specific_screen"}:
             if not ui_flow:
-                await ws_send(websocket, "error", {
-                    "message": "No pending UI anchor found. Start a new UI generation first."
-                })
-                return
+                ui_flow = _ui_flow_from_pending_anchor(raw)
+                if ui_flow:
+                    state["ui_flow"]["ui"] = ui_flow
+                else:
+                    await ws_send(websocket, "error", {
+                        "message": "No pending UI anchor found. Start a new UI generation first."
+                    })
+                    return
 
             flow_query    = ui_flow.get("query", "")
             flow_platform = ui_flow.get("platform", "mobile")
@@ -1133,7 +1771,7 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
                 try:
                     _, new_anchor = await asyncio.to_thread(generate_image, prompt, anchor_bytes, filename)
                 except Exception as exc:
-                    await ws_send(websocket, "error", {"message": str(exc)})
+                    await ws_send_generation_error(websocket, exc)
                     return
 
                 ui_flow["anchor_bytes_b64"] = _bytes_to_base64(new_anchor)
@@ -1236,7 +1874,7 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
             try:
                 _, raw_bytes = await asyncio.to_thread(generate_image, prompt, anchor_bytes, filename)
             except Exception as exc:
-                await ws_send(websocket, "error", {"message": str(exc)})
+                await ws_send_generation_error(websocket, exc)
                 return
 
             _remember_turn(session_id, "ui", "assistant",
@@ -1252,8 +1890,23 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
             await ws_send(websocket, "done", {})
             return
 
+        if not query:
+            await ws_send(websocket, "assistant_message", {
+                "message": (
+                    "I'm the UI workspace assistant — I only generate app screens (mobile, web, tablet). "
+                    "Ask for advice or describe an app to generate."
+                ),
+            })
+            await ws_send(websocket, "done", {})
+            return
+
         # Natural-language path: classify chat intent first
         await ws_send(websocket, "status", {"message": "Understanding your request…"})
+        scope_check = await asyncio.to_thread(classify_panel_message, "ui", query, forced_platform)
+        if scope_check.get("mode") == "out_of_scope":
+            await _emit_panel_chat(websocket, session_id, "ui", query, scope_check.get("reply", ""))
+            return
+
         chat_meta = await asyncio.to_thread(classify_ui_chat_intent, query, forced_platform)
         mode = chat_meta.get("mode", "chat")
 
@@ -1303,7 +1956,7 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
                 try:
                     _, raw_bytes = await asyncio.to_thread(generate_image, prompt, anchor_bytes, filename)
                 except Exception as exc:
-                    await ws_send(websocket, "error", {"message": str(exc)})
+                    await ws_send_generation_error(websocket, exc)
                     return
 
                 await ws_send(websocket, "screen", {
@@ -1353,7 +2006,7 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
                 user_ref_bytes, "ui_style_guide.png"
             )
         except Exception as exc:
-            await ws_send(websocket, "error", {"message": f"Style guide failed: {exc}"})
+            await ws_send_generation_error(websocket, exc, prefix="Style guide failed. ")
             return
 
         await ws_send(websocket, "style_guide", {
@@ -1375,7 +2028,7 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
                 generate_image, anchor_prompt, style_bytes, anchor_filename
             )
         except Exception as exc:
-            await ws_send(websocket, "error", {"message": str(exc)})
+            await ws_send_generation_error(websocket, exc)
             return
 
         state["ui_flow"]["ui"] = {
@@ -1399,6 +2052,10 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
             "filename":  anchor_filename,
             "screen":    anchor_screen,
             "platform":  platform,
+            "query":     query,
+            "screens":   screens,
+            "navigation": navigation,
+            "style_guide_b64": _bytes_to_base64(style_bytes),
             "remaining_screens": screens[1:],
             "node_id": next((node.get("id", "") for node in screen_graph.get("nodes", []) if node.get("screen", "").lower() == anchor_screen.lower()), ""),
             "screen_graph": screen_graph,
@@ -1411,7 +2068,7 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        await ws_send(websocket, "error", {"message": str(exc)})
+        await ws_send_generation_error(websocket, exc)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1420,65 +2077,18 @@ async def _process_ui_message(websocket: WebSocket, raw: dict):
 
 @app.websocket("/ws/logo")
 async def ws_logo(websocket: WebSocket):
+    """Logo designs only — chat or logo generation."""
     await websocket.accept()
     try:
-        raw        = await websocket.receive_json()
-        session_id = _normalize_session_id(raw.get("session_id") or raw.get("sessionId"))
-        _CURRENT_OUTPUT_DIR.set(_session_output_dir(session_id))
-        query      = raw.get("query", "")
-        ref_b64    = raw.get("reference_image_b64")
-        prev_b64   = raw.get("previous_image_b64")
+        async def _handler(ws: WebSocket, raw: dict) -> None:
+            await _process_logo_message(ws, raw)
+            await ws_send(ws, "done", {})
 
-        anchor_bytes = resolve_anchor(ref_b64, prev_b64, session_id, "logo")
-        ctx          = _session_context(session_id, "logo")
-
-        await ws_send(websocket, "status", {"message": "Classifying intent…"})
-        meta    = await asyncio.to_thread(classify_intent, query)
-        is_edit = meta.get("is_edit", False) and anchor_bytes is not None
-
-        _remember_turn(session_id, "logo", "user",
-                       query=query, intent="logo", is_edit=is_edit)
-
-        if is_edit and anchor_bytes:
-            prompt   = (f"Modify this logo image based on: {query}. "
-                        "Keep all other styles, fonts, and layouts identical.")
-            filename = "logo_updated.png"
-        elif anchor_bytes:
-            prompt   = (f"Using this image as a strict style and consistency reference, "
-                        f"generate a logo for: {query}. "
-                        "Maintain same design language, color palette, and typography. "
-                        "High-fidelity, clean vector-style, transparent or clean background.")
-            filename = "logo_design.png"
-        else:
-            prompt   = (f"Professional logo design: {query}. "
-                        "High-fidelity, clean vector-style, transparent or clean background.")
-            filename = "logo_design.png"
-
-        if ctx:
-            prompt = f"[Session history]\n{ctx}\n\n{prompt}"
-
-        await ws_send(websocket, "status", {"message": "Generating logo…"})
-        try:
-            _, raw_bytes = await asyncio.to_thread(generate_image, prompt, anchor_bytes, filename)
-        except Exception as exc:
-            await ws_send(websocket, "error", {"message": str(exc)})
-            return
-
-        _remember_turn(session_id, "logo", "assistant",
-                       summary="Generated logo", prompt=prompt,
-                       raw_bytes=raw_bytes, filename=filename, intent="logo", is_edit=is_edit)
-
-        await ws_send(websocket, "logo", {
-            "image_b64": _bytes_to_base64(raw_bytes),
-            "filename":  filename,
-            "is_edit":   is_edit,
-        })
-        await ws_send(websocket, "done", {})
-
+        await _run_panel_socket_loop(websocket, _handler, panel="logo")
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        await ws_send(websocket, "error", {"message": str(exc)})
+        await ws_send_generation_error(websocket, exc)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1487,61 +2097,18 @@ async def ws_logo(websocket: WebSocket):
 
 @app.websocket("/ws/illustration")
 async def ws_illustration(websocket: WebSocket):
+    """Illustrations only — chat or illustration generation."""
     await websocket.accept()
     try:
-        raw        = await websocket.receive_json()
-        session_id = _normalize_session_id(raw.get("session_id") or raw.get("sessionId"))
-        _CURRENT_OUTPUT_DIR.set(_session_output_dir(session_id))
-        query      = raw.get("query", "")
-        ref_b64    = raw.get("reference_image_b64")
-        prev_b64   = raw.get("previous_image_b64")
+        async def _handler(ws: WebSocket, raw: dict) -> None:
+            await _process_illustration_message(ws, raw)
+            await ws_send(ws, "done", {})
 
-        anchor_bytes = resolve_anchor(ref_b64, prev_b64, session_id, "illustration")
-        ctx          = _session_context(session_id, "illustration")
-
-        meta    = await asyncio.to_thread(classify_intent, query)
-        is_edit = meta.get("is_edit", False) and anchor_bytes is not None
-
-        _remember_turn(session_id, "illustration", "user",
-                       query=query, intent="illustration", is_edit=is_edit)
-
-        if is_edit and anchor_bytes:
-            prompt   = (f"Modify this illustration based on: {query}. "
-                        "Keep all other styles, colors, and composition identical.")
-            filename = "illustration_updated.png"
-        elif anchor_bytes:
-            prompt   = (f"Using this image as a style reference, create a new illustration: {query}. "
-                        "Maintain same artistic style, color palette, and visual language.")
-            filename = "illustration_design.png"
-        else:
-            prompt   = f"Professional illustration: {query}."
-            filename = "illustration_design.png"
-
-        if ctx:
-            prompt = f"[Session history]\n{ctx}\n\n{prompt}"
-
-        await ws_send(websocket, "status", {"message": "Generating illustration…"})
-        try:
-            _, raw_bytes = await asyncio.to_thread(generate_image, prompt, anchor_bytes, filename)
-        except Exception as exc:
-            await ws_send(websocket, "error", {"message": str(exc)})
-            return
-
-        _remember_turn(session_id, "illustration", "assistant",
-                       summary="Generated illustration", prompt=prompt,
-                       raw_bytes=raw_bytes, filename=filename, intent="illustration", is_edit=is_edit)
-
-        await ws_send(websocket, "illustration", {
-            "image_b64": _bytes_to_base64(raw_bytes),
-            "filename":  filename,
-            "is_edit":   is_edit,
-        })
-        await ws_send(websocket, "done", {})
-
+        await _run_panel_socket_loop(websocket, _handler, panel="illustration")
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        await ws_send(websocket, "error", {"message": str(exc)})
+        await ws_send_generation_error(websocket, exc)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1550,65 +2117,18 @@ async def ws_illustration(websocket: WebSocket):
 
 @app.websocket("/ws/social_media")
 async def ws_social_media(websocket: WebSocket):
+    """Social posts only — chat or post graphic generation."""
     await websocket.accept()
     try:
-        raw        = await websocket.receive_json()
-        session_id = _normalize_session_id(raw.get("session_id") or raw.get("sessionId"))
-        _CURRENT_OUTPUT_DIR.set(_session_output_dir(session_id))
-        query      = raw.get("query", "")
-        forced_plt = raw.get("platform")
-        ref_b64    = raw.get("reference_image_b64")
-        prev_b64   = raw.get("previous_image_b64")
+        async def _handler(ws: WebSocket, raw: dict) -> None:
+            await _process_social_media_message(ws, raw)
+            await ws_send(ws, "done", {})
 
-        anchor_bytes = resolve_anchor(ref_b64, prev_b64, session_id, "social_media")
-        ctx          = _session_context(session_id, "social_media")
-
-        meta     = await asyncio.to_thread(classify_intent, query, forced_plt)
-        platform = forced_plt or meta.get("platform", "instagram")
-        is_edit  = meta.get("is_edit", False) and anchor_bytes is not None
-
-        _remember_turn(session_id, "social_media", "user",
-                       query=query, intent="social_media", platform=platform, is_edit=is_edit)
-
-        if is_edit and anchor_bytes:
-            prompt   = (f"Modify this social media image based on: {query}. "
-                        "Keep all other styles, fonts, and layouts identical.")
-            filename = "social_media_updated.png"
-        elif anchor_bytes:
-            prompt   = (f"Using this image as a brand consistency reference, create a {platform} post: {query}. "
-                        "Maintain same visual identity, color palette, and design language.")
-            filename = "social_media_design.png"
-        else:
-            prompt   = f"Professional {platform} social media post: {query}."
-            filename = "social_media_design.png"
-
-        if ctx:
-            prompt = f"[Session history]\n{ctx}\n\n{prompt}"
-
-        await ws_send(websocket, "status", {"message": f"Generating {platform} asset…"})
-        try:
-            _, raw_bytes = await asyncio.to_thread(generate_image, prompt, anchor_bytes, filename)
-        except Exception as exc:
-            await ws_send(websocket, "error", {"message": str(exc)})
-            return
-
-        _remember_turn(session_id, "social_media", "assistant",
-                       summary=f"Generated {platform} asset", prompt=prompt,
-                       raw_bytes=raw_bytes, filename=filename,
-                       intent="social_media", platform=platform, is_edit=is_edit)
-
-        await ws_send(websocket, "social_media", {
-            "image_b64": _bytes_to_base64(raw_bytes),
-            "filename":  filename,
-            "platform":  platform,
-            "is_edit":   is_edit,
-        })
-        await ws_send(websocket, "done", {})
-
+        await _run_panel_socket_loop(websocket, _handler, panel="social_media")
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        await ws_send(websocket, "error", {"message": str(exc)})
+        await ws_send_generation_error(websocket, exc)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1672,7 +2192,7 @@ async def ws_practice(websocket: WebSocket):
                     user_ref_bytes, "practice_ui_style_guide.png"
                 )
             except Exception as exc:
-                await ws_send(websocket, "error", {"message": f"Style guide failed: {exc}"})
+                await ws_send_generation_error(websocket, exc, prefix="Style guide failed. ")
                 return
 
             await ws_send(websocket, "style_guide", {
@@ -1698,7 +2218,7 @@ async def ws_practice(websocket: WebSocket):
                         generate_image, prompt, style_bytes, filename
                     )
                 except Exception as exc:
-                    await ws_send(websocket, "error", {"message": str(exc)})
+                    await ws_send_generation_error(websocket, exc)
                     return
 
                 _remember_turn(session_id, "practice", "assistant",
@@ -1720,20 +2240,14 @@ async def ws_practice(websocket: WebSocket):
             anchor_bytes = resolve_anchor(ref_b64, prev_b64, session_id, "practice")
             ctx          = _session_context(session_id, "practice")  # defined before use
 
-            if is_edit and anchor_bytes:
-                prompt   = (f"Modify this logo image based on: {query}. "
-                            "Keep all other styles, fonts, and layouts identical.")
-                filename = "practice_logo_updated.png"
-            elif anchor_bytes:
-                prompt   = (f"Using this image as a style reference, generate a logo for: {query}. "
-                            "Maintain same design language, color palette, and typography. "
-                            "High-fidelity, clean vector-style, transparent or clean background.")
-                filename = "practice_logo_design.png"
-            else:
-                prompt   = (f"Professional logo design: {query}. "
-                            "High-fidelity, clean vector-style, transparent or clean background.")
+            prompt = build_logo_prompt(
+                query,
+                is_edit=is_edit and anchor_bytes is not None,
+                has_reference=anchor_bytes is not None,
+            )
+            filename = "practice_logo_updated.png" if is_edit and anchor_bytes else "practice_logo_design.png"
+            if not anchor_bytes:
                 anchor_bytes = None
-                filename = "practice_logo_design.png"
 
             if ctx:
                 prompt = f"[Session history]\n{ctx}\n\n{prompt}"
@@ -1742,7 +2256,7 @@ async def ws_practice(websocket: WebSocket):
             try:
                 _, raw_bytes = await asyncio.to_thread(generate_image, prompt, anchor_bytes, filename)
             except Exception as exc:
-                await ws_send(websocket, "error", {"message": str(exc)})
+                await ws_send_generation_error(websocket, exc)
                 return
 
             _remember_turn(session_id, "practice", "assistant",
@@ -1760,18 +2274,15 @@ async def ws_practice(websocket: WebSocket):
             anchor_bytes = resolve_anchor(ref_b64, prev_b64, session_id, "practice")
             ctx          = _session_context(session_id, "practice")  # defined before use
 
-            if is_edit and anchor_bytes:
-                prompt   = (f"Modify this social media image based on: {query}. "
-                            "Keep all other styles, fonts, and layouts identical.")
-                filename = "practice_social_updated.png"
-            elif anchor_bytes:
-                prompt   = (f"Using this image as a brand consistency reference, create a {platform} post: {query}. "
-                            "Maintain same visual identity, color palette, and design language.")
-                filename = "practice_social_design.png"
-            else:
-                prompt   = f"Professional {platform} social media post: {query}."
+            prompt = build_social_media_prompt(
+                query,
+                platform,
+                is_edit=is_edit and anchor_bytes is not None,
+                has_reference=anchor_bytes is not None,
+            )
+            filename = "practice_social_updated.png" if is_edit and anchor_bytes else "practice_social_design.png"
+            if not anchor_bytes:
                 anchor_bytes = None
-                filename = "practice_social_design.png"
 
             if ctx:
                 prompt = f"[Session history]\n{ctx}\n\n{prompt}"
@@ -1780,7 +2291,7 @@ async def ws_practice(websocket: WebSocket):
             try:
                 _, raw_bytes = await asyncio.to_thread(generate_image, prompt, anchor_bytes, filename)
             except Exception as exc:
-                await ws_send(websocket, "error", {"message": str(exc)})
+                await ws_send_generation_error(websocket, exc)
                 return
 
             _remember_turn(session_id, "practice", "assistant",
@@ -1800,18 +2311,18 @@ async def ws_practice(websocket: WebSocket):
             anchor_bytes = resolve_anchor(ref_b64, prev_b64, session_id, "practice")
             ctx          = _session_context(session_id, "practice")  # defined before use
 
-            if is_edit and anchor_bytes:
-                prompt   = (f"Modify this illustration based on: {query}. "
-                            "Keep all other styles, colors, and composition identical.")
-                filename = "practice_illustration_updated.png"
-            elif anchor_bytes:
-                prompt   = (f"Using this image as a style reference, create a new illustration: {query}. "
-                            "Maintain same artistic style, color palette, and visual language.")
-                filename = "practice_illustration_design.png"
-            else:
-                prompt   = f"Professional illustration: {query}."
+            prompt = build_illustration_prompt(
+                query,
+                is_edit=is_edit and anchor_bytes is not None,
+                has_reference=anchor_bytes is not None,
+            )
+            filename = (
+                "practice_illustration_updated.png"
+                if is_edit and anchor_bytes
+                else "practice_illustration_design.png"
+            )
+            if not anchor_bytes:
                 anchor_bytes = None
-                filename = "practice_illustration_design.png"
 
             if ctx:
                 prompt = f"[Session history]\n{ctx}\n\n{prompt}"
@@ -1820,7 +2331,7 @@ async def ws_practice(websocket: WebSocket):
             try:
                 _, raw_bytes = await asyncio.to_thread(generate_image, prompt, anchor_bytes, filename)
             except Exception as exc:
-                await ws_send(websocket, "error", {"message": str(exc)})
+                await ws_send_generation_error(websocket, exc)
                 return
 
             _remember_turn(session_id, "practice", "assistant",
@@ -1838,7 +2349,7 @@ async def ws_practice(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        await ws_send(websocket, "error", {"message": str(exc)})
+        await ws_send_generation_error(websocket, exc)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

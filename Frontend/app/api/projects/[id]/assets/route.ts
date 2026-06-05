@@ -11,6 +11,15 @@ import { canRead, canWrite, getUserRoleForProject } from "@/lib/projects/authz";
 
 export const dynamic = "force-dynamic";
 
+// Landing page images are sent as base64 data: URLs which can be 2-10 MB each.
+// The default Next.js App Router body limit is 4 MB — raise it so uploads don't
+// silently fail and leave images unresolvable on project reload.
+export const maxDuration = 60;
+// @ts-ignore – Next.js 14 App Router route segment config
+export const config = {
+  api: { bodyParser: { sizeLimit: "50mb" } },
+};
+
 const ImageSchema = z.object({
   id: z.string().optional(),
   page_name: z.string().optional(),
@@ -81,7 +90,7 @@ export async function GET(_: Request, ctx: { params: Promise<{ id: string }> }) 
   const images = mergeProjectGeneratedImages({
     existing: existingGenerated,
     incoming: [],
-    canonical: rows.map((r) => ({
+    canonical: rows.map((r: any) => ({
       id: r.id,
       source_image_id: r.source_image_id,
       page_name: r.page_name,
@@ -174,7 +183,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const mergedGenerated = mergeProjectGeneratedImages({
     existing: existingGenerated,
     incoming: body.images,
-    canonical: canonical.map((r) => ({
+    canonical: canonical.map((r: any) => ({
       id: r.id,
       source_image_id: r.source_image_id,
       page_name: r.page_name,
